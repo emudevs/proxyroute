@@ -1,0 +1,12 @@
+.gradle/
+**/build/
+local.properties
+app/libs/*.aar
+dist/
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.dpapi
+app/libs/*-sources.jar
+.qa/
