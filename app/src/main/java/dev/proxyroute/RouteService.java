@@ -76,11 +76,15 @@ public final class RouteService extends VpnService {
         if(!wanted || !config.enabled("wifiOnly",false) || worker.isShutdown()) return;
         try {
             worker.execute(()->{
-                Network network=networks.getActiveNetwork();
-                boolean fallback=config.read().active()!=null && !isWifi(network);
-                if(engine!=null && (!java.util.Objects.equals(network,tunnelNetwork) || wifiFallback!=fallback)) {
-                    if(pending!=null)pending.cancel(false);
-                    establishTunnel();
+                try {
+                    Network network=networks.getActiveNetwork();
+                    boolean fallback=config.read().active()!=null && !isWifi(network);
+                    if(engine!=null && (!java.util.Objects.equals(network,tunnelNetwork) || wifiFallback!=fallback)) {
+                        if(pending!=null)pending.cancel(false);
+                        establishTunnel();
+                    }
+                } catch(Config.ReadFailure | SecurityException e) {
+                    reportFailure(e instanceof Config.ReadFailure ? "config_read" : "vpn_permission",false);
                 }
             });
         } catch(java.util.concurrent.RejectedExecutionException ignored) { }
@@ -126,10 +130,19 @@ public final class RouteService extends VpnService {
         }
         wanted = true;
         Notification notification = notification("Подключение VPN…");
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            startForeground(NOTIFICATION, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIFICATION, notification);
+            }
+        } catch (IllegalStateException | SecurityException e) {
+            wanted = false;
+            var detail=NetworkErrors.describe("foreground_start");
+            updateStatus(new Status(false,false,"Ошибка VPN · "+detail.title()));
+            history.serviceEvent(detail.title(),detail.code());
+            stopSelfResult(startId);
+            return START_NOT_STICKY;
         }
         worker.execute(() -> {
             if (pending != null) pending.cancel(false);
@@ -143,6 +156,7 @@ public final class RouteService extends VpnService {
         if (!wanted) return;
         update(new Status(engine != null, true, "Подключение VPN…"));
         ParcelFileDescriptor next = null;
+        Engine started = null;
         try {
             Config.Settings settings = config.read();
             Config.Profile profile = settings.active();
@@ -150,8 +164,8 @@ public final class RouteService extends VpnService {
             Network physical=wifiOnly?networks.getActiveNetwork():null;
             boolean fallback=wifiOnly && !isWifi(physical) && profile!=null;
             boolean firewall = Config.FIREWALL.equals(settings.selected());
-            if (!firewall && profile == null) throw new IllegalStateException("Выбранный прокси удалён");
-            Config.Credentials auth = Config.credentials(profile);
+            if (!firewall && profile == null) {reportFailure("profile_missing",false); return;}
+            Config.Credentials auth = fallback ? new Config.Credentials("","") : Config.credentials(profile);
             String ip = "";
             if (profile != null && !fallback) {
                 // Choose the first responsive address when a name has multiple
@@ -191,7 +205,7 @@ public final class RouteService extends VpnService {
                     try { builder.addAllowedApplication(pkg); count++; }
                     catch(PackageManager.NameNotFoundException ignored) { }
                 }
-                if(count==0)throw new IllegalStateException("Выбери установленные приложения в брандмауэре");
+                if(count==0) {reportFailure("app_scope",false); return;}
             } else {
                 builder.addDisallowedApplication(getPackageName());
                 for (String pkg : policy.excluded()) {
@@ -201,11 +215,11 @@ public final class RouteService extends VpnService {
             }
             if(physical!=null)builder.setUnderlyingNetworks(new Network[]{physical});
             next = builder.establish();
-            if (next == null) throw new IllegalStateException("Android отозвал разрешение VPN");
+            if (next == null) {reportFailure("vpn_permission",false); return;}
             Session nextSession = engine == null ? new Session() : session;
             boolean direct=firewall||fallback;
             DnsOptions dns=DnsOptions.selected(config);
-            Engine started=Tunnel.startConfigured(next.getFd(),
+            started=Tunnel.startConfigured(next.getFd(),
                     new FlowHooks(policy,UUID.randomUUID().toString(),nextSession,physical),
                     direct?"direct":profile.protocol(),direct?"":profile.host(),ip,
                     direct?0:profile.port(),auth.user(),auth.password(),direct,dns.url(),dns.bootstrap(),
@@ -214,6 +228,7 @@ public final class RouteService extends VpnService {
             tun = next;
             next = null;
             engine = started;
+            started = null;
             session = nextSession;
             failures = 0;
             tunnelNetwork=physical;
@@ -223,28 +238,39 @@ public final class RouteService extends VpnService {
             history.serviceEvent(message,"closed");
         } catch (Exception | LinkageError e) {
             if (next != null) {
+                stopEngine(started);
                 try { next.close(); } catch (Exception ignored) { }
                 closeTunnel();
             }
-            if (!wanted) return;
-            String error = e.getMessage();
-            if (error == null || error.isEmpty()) error = e.getClass().getSimpleName();
-            NetworkErrors.Detail detail=NetworkErrors.describe(error);
-            String userError=error.startsWith("Выбери")?error:detail.title();
-            update(new Status(engine != null,false,"Ошибка VPN · "+userError));
-            if(failures==0)history.serviceEvent("Ошибка VPN · "+userError,detail.code());
-            if (wanted) {
-                int delay = Math.min(120, 5 << Math.min(failures++, 5));
-                pending = worker.schedule(this::establishTunnel, delay, TimeUnit.SECONDS);
-            }
+            if (e instanceof Config.ReadFailure) reportFailure("config_read",false);
+            else if (e instanceof Config.CredentialsFailure) reportFailure("credentials_read",false);
+            else if (e instanceof LinkageError) reportFailure("native_start",false);
+            else if (e instanceof SecurityException) reportFailure("vpn_permission",false);
+            else reportFailure(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage(),true);
         }
     }
 
-    private void closeTunnel() {
-        if (engine != null) {
-            engine.stop();
-            engine = null;
+    private void reportFailure(String reason,boolean retry) {
+        if (!wanted) return;
+        NetworkErrors.Detail detail=NetworkErrors.describe(reason);
+        String message="Ошибка VPN · "+detail.title();
+        if (!message.equals(status.message()) && failures==0) history.serviceEvent(message,detail.code());
+        update(new Status(engine != null,false,message));
+        if (retry && !worker.isShutdown()) {
+            int delay=Math.min(120,5 << Math.min(failures++,5));
+            pending=worker.schedule(this::establishTunnel,delay,TimeUnit.SECONDS);
         }
+    }
+
+    private static void stopEngine(Engine engine) {
+        if (engine==null)return;
+        try { engine.stop(); }
+        catch (RuntimeException | LinkageError e) { android.util.Log.w("ProxyRoute","Could not stop native VPN engine"); }
+    }
+
+    private void closeTunnel() {
+        stopEngine(engine);
+        engine = null;
         if (tun != null) {
             try { tun.close(); } catch (Exception ignored) { }
             tun = null;
@@ -260,7 +286,12 @@ public final class RouteService extends VpnService {
     @Override public void onDestroy() {
         wanted = false;
         main.removeCallbacks(resetNoticeSpeed);
-        if(observingNetwork)networks.unregisterNetworkCallback(networkChanges);
+        if(observingNetwork) {
+            try { networks.unregisterNetworkCallback(networkChanges); }
+            catch (IllegalArgumentException | SecurityException e) {
+                android.util.Log.w("ProxyRoute","Could not unregister network listener");
+            }
+        }
         if (instance == this) instance = null;
         worker.execute(() -> {
             if (pending != null) pending.cancel(false);
@@ -301,7 +332,8 @@ public final class RouteService extends VpnService {
 
     private void refreshNotification(Status current, String speed) {
         noticeSpeed = speed;
-        getSystemService(NotificationManager.class).notify(NOTIFICATION, notification(current.message(), speed));
+        try { getSystemService(NotificationManager.class).notify(NOTIFICATION, notification(current.message(), speed)); }
+        catch (SecurityException e) { android.util.Log.w("ProxyRoute","VPN notification unavailable"); }
     }
 
     private static String speedText(double up, double down) {

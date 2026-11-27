@@ -34,6 +34,9 @@ final class History extends SQLiteOpenHelper {
     record Totals(long all, long blocked, long errors) {}
     record Chart(long[] up, long[] down, long totalUp, long totalDown) {}
     private interface Event { void apply(SQLiteDatabase db); }
+    static final class Unavailable extends java.io.IOException {
+        Unavailable(Throwable cause) { super("Journal unavailable",cause); }
+    }
 
     static synchronized History get(Context context) {
         if (instance == null) instance = new History(context.getApplicationContext());
@@ -44,9 +47,13 @@ final class History extends SQLiteOpenHelper {
         super(context, "connections.db", null, 1);
         setWriteAheadLoggingEnabled(true);
         writer.execute(() -> {
-            SQLiteDatabase db = getWritableDatabase();
-            db.execSQL("UPDATE connections SET result='process stopped' WHERE result='active'");
-            trim(db, System.currentTimeMillis());
+            try {
+                SQLiteDatabase db = getWritableDatabase();
+                db.execSQL("UPDATE connections SET result='process stopped' WHERE result='active'");
+                trim(db, System.currentTimeMillis());
+            } catch (RuntimeException e) {
+                Log.w("ProxyRoute", "Journal initialization failed");
+            }
         });
     }
 
@@ -83,9 +90,9 @@ final class History extends SQLiteOpenHelper {
 
     void export(java.io.OutputStream stream) throws java.io.IOException {
         try {
-            writer.submit(this::flush).get(5,TimeUnit.SECONDS);
+            if (!writer.submit(this::flush).get(5,TimeUnit.SECONDS)) throw new Unavailable(null);
         } catch(java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
-            throw new java.io.IOException("Could not prepare journal",e);
+            throw new Unavailable(e);
         } catch(InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new java.io.IOException("Journal export interrupted",e);
@@ -111,7 +118,7 @@ final class History extends SQLiteOpenHelper {
                 json.name("received").value(c.getLong(7));
                 json.endObject();
             }
-        }
+        } catch (android.database.sqlite.SQLiteException e) { throw new Unavailable(e); }
         json.endArray();
         json.endObject();
         json.flush();
@@ -148,7 +155,7 @@ final class History extends SQLiteOpenHelper {
         if (scheduled.compareAndSet(false, true)) writer.schedule(this::flush, 350, TimeUnit.MILLISECONDS);
     }
 
-    private void flush() {
+    private boolean flush() {
         long up = pendingUp.getAndSet(0), down = pendingDown.getAndSet(0);
         try {
             SQLiteDatabase db = getWritableDatabase();
@@ -172,8 +179,10 @@ final class History extends SQLiteOpenHelper {
                 db.endTransaction();
             }
             revision.incrementAndGet();
+            return true;
         } catch (RuntimeException e) {
-            Log.e("ProxyRoute", "Could not write connection history", e);
+            Log.w("ProxyRoute", "Could not write connection history");
+            return false;
         } finally {
             scheduled.set(false);
             if (!events.isEmpty() || pendingUp.get() != 0 || pendingDown.get() != 0) schedule();
@@ -244,19 +253,17 @@ final class History extends SQLiteOpenHelper {
         return new Chart(up, down, totalUp, totalDown);
     }
 
-    void clear(Runnable finished) {
+    void clear(Runnable finished,Runnable failed) {
         writer.execute(() -> {
-            flush();
-            SQLiteDatabase db = getWritableDatabase();
-            db.beginTransaction();
             try {
-                db.delete("connections", null, null);
-                db.setTransactionSuccessful();
-            } finally {
-                db.endTransaction();
+                if (!flush()) { failed.run(); return; }
+                getWritableDatabase().delete("connections", null, null);
+                revision.incrementAndGet();
+                finished.run();
+            } catch (RuntimeException e) {
+                Log.w("ProxyRoute", "Could not clear connection history");
+                failed.run();
             }
-            revision.incrementAndGet();
-            finished.run();
         });
     }
 }

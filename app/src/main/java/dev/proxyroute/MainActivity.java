@@ -95,7 +95,7 @@ public final class MainActivity extends Activity {
     private final android.util.LruCache<String,android.graphics.Bitmap> appIcons=new android.util.LruCache<>(96);
     private final BroadcastReceiver vpnChanges=new BroadcastReceiver() {
         @Override public void onReceive(Context context,Intent intent) {
-            updateHero(); updateFirewallStatus();
+            refreshVpnUi();
         }
     };
     private LinearLayout page, nav, hero, serverRows, stats;
@@ -113,6 +113,8 @@ public final class MainActivity extends Activity {
     private boolean choosingApps;
     private int firewallPosition,firewallTop;
     private boolean resumed, loadingJournal, searching, searchingHistory, appScan, appsReady;
+    private boolean appScanFailed;
+    private long retryJournalAt;
     private int tab, screenVersion, chartPeriod, filter, offset;
     private long lastHistoryRevision=-1;
     private InstalledApp runningRule;
@@ -184,7 +186,7 @@ public final class MainActivity extends Activity {
         IntentFilter filter=new IntentFilter(RouteService.STATUS_CHANGED);
         if(Build.VERSION.SDK_INT>=33)registerReceiver(vpnChanges,filter,Context.RECEIVER_NOT_EXPORTED);
         else registerReceiver(vpnChanges,filter);
-        if(getPreferences(MODE_PRIVATE).getBoolean("autoCheck",true)) checkAll();
+        if(getPreferences(MODE_PRIVATE).getBoolean("autoCheck",true))checkAll();
     }
     @Override protected void onResume() {
         super.onResume();
@@ -216,14 +218,37 @@ public final class MainActivity extends Activity {
     }
     private final Runnable refresh=new Runnable() {
         @Override public void run() {
-            updateHero();
-            updateFirewallStatus();
+            refreshVpnUi();
             if (tab==1) loadHistory(false);
             if(resumed) ui.postDelayed(this,1000);
         }
     };
 
+    private void refreshVpnUi() {
+        try { updateHero(); updateFirewallStatus(); }
+        catch(Config.ReadFailure e) { showConfigError(); }
+    }
+
     private void render() {
+        try { renderContent(); }
+        catch(Config.ReadFailure e) { showConfigError(); }
+    }
+
+    private void showConfigError() {
+        screenVersion++;
+        section=""; editPage=null; returnToEdit=null; importField=null; fromLinkAction=null;
+        frame.removeAllViews();
+        nav.setVisibility(View.GONE);
+        hero=null; chart=null; activeApps=null; firewallToggle=null;
+        page=design.column();
+        design.pad(page,16,24);
+        frame.addView(page,new FrameLayout.LayoutParams(-1,-1));
+        add(page,t("Не удалось прочитать настройки ProxyRoute",21,TEXT,600),-2,0);
+        add(page,t("Профили и правила сохранены на устройстве.",14,MUTED,400),-2,10);
+        add(page,design.pill("Повторить",14,BG,LIME,48,this::render),48,16);
+    }
+
+    private void renderContent() {
         screenVersion++;
         loadingJournal=false; lastHistoryRevision=-1;
         frame.removeAllViews(); nav.removeAllViews(); checkViews.clear();
@@ -292,6 +317,13 @@ public final class MainActivity extends Activity {
                 .setDuration(duration).setInterpolator(EASE_OUT).start();
     }
     private void toggle() {
+        try { toggleVpn(); }
+        catch(IllegalStateException | SecurityException | android.content.ActivityNotFoundException e) {
+            showMessage("Android не разрешил изменить состояние VPN. Проверь системные настройки VPN.");
+        }
+    }
+
+    private void toggleVpn() {
         if (RouteService.instance != null) {
             if(RouteService.instance.isAlwaysOn()) { openSettings(Settings.ACTION_VPN_SETTINGS); return; }
             startService(new Intent(this, RouteService.class).setAction(RouteService.DISCONNECT));
@@ -308,7 +340,10 @@ public final class MainActivity extends Activity {
             readQr(payload.getData());
             return;
         }
-        if (request == VPN_REQUEST && result == RESULT_OK) connect();
+        if (request == VPN_REQUEST) {
+            if(result == RESULT_OK) connect();
+            else showMessage("Подключение отменено. Разреши VPN, чтобы включить туннель.");
+        }
         if (request == EXPORT_REQUEST && result == RESULT_OK && payload!=null && payload.getData()!=null) {
             var uri=payload.getData();
             appLoader.execute(()->{
@@ -316,6 +351,8 @@ public final class MainActivity extends Activity {
                     if(out==null)throw new java.io.IOException();
                     history.export(out);
                     ui.post(()->Toast.makeText(this,"Журнал выгружен",Toast.LENGTH_SHORT).show());
+                } catch(History.Unavailable e) {
+                    ui.post(()->showMessage("Журнал недоступен. Повтори экспорт позже."));
                 } catch(Exception e) {
                     ui.post(()->Toast.makeText(this,"Не удалось записать файл журнала. Выбери другой каталог.",Toast.LENGTH_LONG).show());
                 }
@@ -343,8 +380,11 @@ public final class MainActivity extends Activity {
                 var binary=new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(width,height,pixels)));
                 decoded=new MultiFormatReader().decode(binary,Map.of(DecodeHintType.POSSIBLE_FORMATS,
                         List.of(BarcodeFormat.QR_CODE),DecodeHintType.TRY_HARDER,true)).getText();
-            } catch(Exception e) {
+            } catch(com.google.zxing.ReaderException e) {
                 ui.post(()->{if(importField==destination)destination.setError("QR-код на изображении не найден");});
+                return;
+            } catch(java.io.IOException | RuntimeException e) {
+                ui.post(()->{if(importField==destination)destination.setError("Не удалось открыть изображение. Выбери другой файл.");});
                 return;
             }
             ui.post(()->{
@@ -357,7 +397,7 @@ public final class MainActivity extends Activity {
     }
 
     private void connect() {
-        startForegroundService(new Intent(this, RouteService.class).setAction(RouteService.CONNECT));
+        if(!requestTunnelStart())return;
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
                 && !getPreferences(MODE_PRIVATE).getBoolean("notificationAsked", false)) {
             getPreferences(MODE_PRIVATE).edit().putBoolean("notificationAsked", true).apply();
@@ -366,13 +406,27 @@ public final class MainActivity extends Activity {
     }
 
     private void reconfigure() {
-        if (RouteService.instance != null) {
+        if (RouteService.instance != null) requestTunnelStart();
+    }
+
+    private boolean requestTunnelStart() {
+        try {
             startForegroundService(new Intent(this, RouteService.class).setAction(RouteService.CONNECT));
+            return true;
+        } catch(IllegalStateException | SecurityException e) {
+            showMessage("Не удалось запустить VPN. Открой ProxyRoute и повтори подключение.");
+            return false;
         }
     }
 
+    private void showMessage(String message) {
+        if(!isDestroyed()) Toast.makeText(this,message,Toast.LENGTH_LONG).show();
+    }
+
     private void select(String id) {
-        Config.Settings current = config.read();
+        Config.Settings current;
+        try { current=config.read(); }
+        catch(Config.ReadFailure e) { showConfigError(); return; }
         if (id.equals(current.selected())) return;
         if (save(new Config.Settings(current.profiles(), id, current.rules()))) {
             reconfigure();
@@ -393,7 +447,9 @@ public final class MainActivity extends Activity {
     private void delete(Config.Profile profile) {
         new AlertDialog.Builder(this).setTitle("Удалить прокси " + profile.label() + "?")
                 .setNegativeButton("Отмена", null).setPositiveButton("Удалить", (d, which) -> {
-                    Config.Settings settings = config.read();
+                    Config.Settings settings;
+                    try { settings=config.read(); }
+                    catch(Config.ReadFailure e) { showConfigError(); return; }
                     boolean active = profile.id().equals(settings.selected());
                     if (active && RouteService.instance != null) {
                         Toast.makeText(this, "Сначала выбери другой прокси или отключи VPN", Toast.LENGTH_LONG).show();
@@ -409,7 +465,8 @@ public final class MainActivity extends Activity {
     }
 
     private void checkAll() {
-        for (Config.Profile p : config.read().profiles()) check(p, false);
+        try { for (Config.Profile p : config.read().profiles()) check(p, false); }
+        catch(Config.ReadFailure e) { showConfigError(); }
     }
 
     private void check(Config.Profile p, boolean force) {
@@ -425,7 +482,7 @@ public final class MainActivity extends Activity {
                 if (isDestroyed() || checks.get(p.id()) != pending) return;
                 checks.put(p.id(),finalResult);
                 showProbe(p);
-                updateHero();
+                refreshVpnUi();
             });
         });
     }
@@ -526,7 +583,13 @@ public final class MainActivity extends Activity {
 
     private void openSettings(String action) {
         try { startActivity(new Intent(action)); }
-        catch(android.content.ActivityNotFoundException e) { startActivity(new Intent(Settings.ACTION_SETTINGS)); }
+        catch(android.content.ActivityNotFoundException | SecurityException e) {
+            openActivity(new Intent(Settings.ACTION_SETTINGS),"Системные настройки недоступны");
+        }
+    }
+    private void openActivity(Intent intent,String failure) {
+        try { startActivity(intent); }
+        catch(android.content.ActivityNotFoundException | SecurityException e) { showMessage(failure); }
     }
 
     private void servers() {
@@ -840,8 +903,9 @@ public final class MainActivity extends Activity {
         add(body,endpoints,-2,20);
 
         Config.Credentials credentials;
-        try { credentials=Config.credentials(previous); }
-        catch(Exception e) { credentials=new Config.Credentials("",""); }
+        boolean unreadableCredentials;
+        try { credentials=Config.credentials(previous); unreadableCredentials=false; }
+        catch(Config.CredentialsFailure e) { credentials=new Config.Credentials("",""); unreadableCredentials=true; }
         boolean[] auth={previous==null||!previous.secret().isEmpty()};
         EditText user=design.field("Логин",credentials.user(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
         EditText pass=design.field("Пароль",credentials.password(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
@@ -887,9 +951,15 @@ public final class MainActivity extends Activity {
         TextView error=t("",13,ROSE,400);
         error.setVisibility(View.GONE);
         java.util.function.Consumer<String> showError=message->{ error.setText(message); error.setVisibility(View.VISIBLE); };
-        java.util.concurrent.Callable<Config.Profile> profile=()->Config.create(previous,name.getText().toString(),PROTOCOLS[protocol[0]],
-                host.getText().toString(),Integer.parseInt(port.getText().toString()),
-                auth[0]?user.getText().toString():"",auth[0]?pass.getText().toString():"");
+        if(unreadableCredentials) showError.accept("Не удалось открыть сохранённый логин и пароль. Введи их заново.");
+        final boolean needsCredentials=unreadableCredentials;
+        java.util.concurrent.Callable<Config.Profile> profile=()-> {
+            if(needsCredentials && auth[0] && user.length()==0 && pass.length()==0)
+                throw new IllegalArgumentException("Введи данные для входа заново или отключи авторизацию.");
+            return Config.create(previous,name.getText().toString(),PROTOCOLS[protocol[0]],
+                    host.getText().toString(),Integer.parseInt(port.getText().toString()),
+                    auth[0]?user.getText().toString():"",auth[0]?pass.getText().toString():"");
+        };
         design.action(qr,TILE,100,0,()->{
             try {
                 boolean encrypted=auth[0] && (user.length()>0 || pass.length()>0);
@@ -903,6 +973,8 @@ public final class MainActivity extends Activity {
         design.action(test,TILE,100,0,()-> {
             Config.Profile candidate;
             try { candidate=profile.call(); }
+            catch(NumberFormatException e) { showError.accept("Укажи порт от 1 до 65535"); return; }
+            catch(IllegalArgumentException e) { showError.accept(e.getMessage()); return; }
             catch(Exception e) { showError.accept("Проверь адрес, порт и данные авторизации"); return; }
             error.setVisibility(View.GONE);
             test.setEnabled(false);
@@ -932,14 +1004,20 @@ public final class MainActivity extends Activity {
                 Config.Settings settings=config.read();
                 List<Config.Profile> profiles=new ArrayList<>(settings.profiles());
                 if(previous==null) profiles.add(next);
-                else profiles.set(profiles.indexOf(previous),next);
+                else {
+                    int index=profiles.indexOf(previous);
+                    if(index<0) {showError.accept("Профиль изменился. Открой его из списка серверов заново."); return;}
+                    profiles.set(index,next);
+                }
                 String selected=settings.profiles().isEmpty()?next.id():settings.selected();
                 if(save(new Config.Settings(profiles,selected,settings.rules()))) {
                     if(selected.equals(next.id())) reconfigure();
                     check(next,true); closePage();
                 }
             } catch(NumberFormatException e) { showError.accept("Укажи порт от 1 до 65535"); }
-            catch(Exception e) { showError.accept(e.getMessage()==null?"Не удалось сохранить профиль":e.getMessage()); }
+            catch(IllegalArgumentException e) { showError.accept(e.getMessage()); }
+            catch(Config.ReadFailure e) { showError.accept(e.getMessage()); }
+            catch(Exception e) { showError.accept("Не удалось сохранить профиль"); }
         });
         add(footer,save,56,0);
         if(previous!=null) add(footer,design.pill("Удалить сервер",14,ROSE,PANEL,40,()->delete(previous)),40,8);
@@ -1088,7 +1166,7 @@ public final class MainActivity extends Activity {
         add(body,design.pill("Открыть QR из изображения",14,LIME,TILE,42,()->{
             Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE);
             try { startActivityForResult(picker,QR_IMAGE_REQUEST); }
-            catch(android.content.ActivityNotFoundException e) { link.setError("Не удалось открыть выбор изображения"); }
+            catch(android.content.ActivityNotFoundException | SecurityException e) { link.setError("Не удалось открыть выбор изображения"); }
         }),42,8);
         EditText key=design.field("Отдельный ключ", "", InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
         key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
@@ -1178,6 +1256,8 @@ public final class MainActivity extends Activity {
             if(failure!=null) throw failure;
             throw new IllegalStateException("Нет ответа");
         } catch(Exception | LinkageError e) {
+            if(e instanceof Config.CredentialsFailure) return new Probe(p,false,"credentials_read");
+            if(e instanceof LinkageError) return new Probe(p,false,"native_start");
             return new Probe(p,false,"Недоступен · "+(e.getMessage()==null?e.getClass().getSimpleName():e.getMessage()));
         }
     }
@@ -1188,7 +1268,8 @@ public final class MainActivity extends Activity {
             Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json");
             intent.addCategory(Intent.CATEGORY_OPENABLE);
             intent.putExtra(Intent.EXTRA_TITLE,"ProxyRoute-"+java.time.LocalDate.now()+".json");
-            startActivityForResult(intent,EXPORT_REQUEST);
+            try { startActivityForResult(intent,EXPORT_REQUEST); }
+            catch(android.content.ActivityNotFoundException | SecurityException e) { showMessage("Не удалось открыть выбор папки для экспорта"); }
         }));
         gap(actions,8);
         actions.addView(icon(R.drawable.fig_trash,LIGHT,TILE,40,20,100,"Очистить журнал",this::confirmClear));
@@ -1287,7 +1368,8 @@ public final class MainActivity extends Activity {
         options.addView(design.pill("Отмена",14,LIGHT,0,44,dialog::dismiss)); gap(options,8);
         options.addView(design.pill("Очистить",14,TEXT,RED,44,()-> {
             dialog.dismiss();
-            history.clear(()->ui.post(()->{offset=0; loadHistory(true);}));
+            history.clear(()->ui.post(()->{offset=0; loadHistory(true);}),
+                    ()->ui.post(()->showMessage("Не удалось очистить журнал. Повтори попытку позже.")));
         }));
         add(body,options,-2,24);
         dialog.setContentView(body);
@@ -1300,7 +1382,7 @@ public final class MainActivity extends Activity {
     private void loadHistory(boolean force) {
         if(tab!=1 || chart==null || isDestroyed()) return;
         long revision=history.revision();
-        if(!force&&(loadingJournal||lastHistoryRevision==revision))return;
+        if(!force&&(loadingJournal||lastHistoryRevision==revision||SystemClock.elapsedRealtime()<retryJournalAt))return;
         int version=screenVersion, period=chartPeriod, selection=filter, currentOffset=offset;
         String search=eventQuery;
         String key=period+"/"+selection+"/"+currentOffset+"/"+search;
@@ -1325,6 +1407,7 @@ public final class MainActivity extends Activity {
                 ui.post(()->{
                     if(isDestroyed()||screenVersion!=version||request!=journalRequest)return;
                     loadingJournal=false; lastHistoryRevision=revision;
+                    retryJournalAt=0;
                     journalCache.put(key,new CachedReport(revision,report));
                     if(journalCache.size()>8)journalCache.remove(journalCache.keySet().iterator().next());
                     applyReport(report);
@@ -1332,8 +1415,9 @@ public final class MainActivity extends Activity {
             } catch(RuntimeException e) {
                 android.util.Log.e("ProxyRoute","Could not read history",e);
                 ui.post(()->{
-                    if(screenVersion==version && request==journalRequest) {
+                    if(!isDestroyed() && journalAdapter!=null && screenVersion==version && request==journalRequest) {
                         loadingJournal=false;
+                        retryJournalAt=SystemClock.elapsedRealtime()+5000;
                         journalAdapter.error=true;
                         journalAdapter.notifyDataSetChanged();
                     }
@@ -1565,12 +1649,23 @@ public final class MainActivity extends Activity {
         appLoader.execute(()-> {
             PackageManager pm=getPackageManager();
             List<InstalledApp> apps=new ArrayList<>();
-            for(ApplicationInfo app:pm.getInstalledApplications(0)) {
-                if(app.packageName.equals(getPackageName())
-                        ||pm.checkPermission(Manifest.permission.INTERNET,app.packageName)!=PackageManager.PERMISSION_GRANTED)continue;
-                String label=pm.getApplicationLabel(app).toString().trim();
-                String name=label.isEmpty()?app.packageName:label;
-                apps.add(new InstalledApp(app.packageName,name,(name+" "+app.packageName).toLowerCase(Locale.ROOT)));
+            try {
+                for(ApplicationInfo app:pm.getInstalledApplications(0)) {
+                    if(app.packageName.equals(getPackageName())
+                            ||pm.checkPermission(Manifest.permission.INTERNET,app.packageName)!=PackageManager.PERMISSION_GRANTED)continue;
+                    String label;
+                    try { label=pm.getApplicationLabel(app).toString().trim(); }
+                    catch(RuntimeException e) { label=app.packageName; }
+                    String name=label.isEmpty()?app.packageName:label;
+                    apps.add(new InstalledApp(app.packageName,name,(name+" "+app.packageName).toLowerCase(Locale.ROOT)));
+                }
+            } catch (RuntimeException e) {
+                ui.post(()->{
+                    if(isDestroyed())return;
+                    appScan=false; appScanFailed=true;
+                    if(activeApps!=null) activeApps.notifyDataSetChanged();
+                });
+                return;
             }
             apps.sort(Comparator.comparing(InstalledApp::name,String.CASE_INSENSITIVE_ORDER).thenComparing(InstalledApp::pkg));
             ui.post(()-> {
@@ -1578,6 +1673,7 @@ public final class MainActivity extends Activity {
                 installed=apps;
                 appsReady=true;
                 appScan=false;
+                appScanFailed=false;
                 if(activeApps!=null) activeApps.update();
             });
         });
@@ -1591,6 +1687,7 @@ public final class MainActivity extends Activity {
         };
     }
     private void firewall() {
+        if(appScanFailed)fetchApps();
         firewallActive=RouteService.status.connected();
         firewallToggle=design.toggle("VPN и фильтрация",firewallActive,this::toggle);
         header("Брандмауэр",firewallToggle);
@@ -1679,10 +1776,13 @@ public final class MainActivity extends Activity {
         int version=screenVersion;
         data.execute(()->{
             long day=java.time.LocalDate.now().atStartOfDay(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
-            History.Totals totals=history.totals(day);
+            String caption;
+            try { caption="Заблокировано сегодня: "+history.totals(day).blocked(); }
+            catch(android.database.sqlite.SQLiteException e) { caption="Статистика журнала недоступна"; }
+            String result=caption;
             ui.post(()->{
                 if(screenVersion==version && firewallToggle!=null && firewallActive)
-                    firewallCount.setText("Заблокировано сегодня: "+totals.blocked());
+                    firewallCount.setText(result);
             });
         });
     }
@@ -1780,7 +1880,8 @@ public final class MainActivity extends Activity {
             InstalledApp app=getItem(position);
             if(app==null) {
                 TextView empty=recycled==null?t("",14,FAINT,400):(TextView)recycled;
-                empty.setText(appsReady?"Приложения не найдены":"Загрузка приложений…");
+                empty.setText(appsReady?"Приложения не найдены":appScanFailed?
+                        "Не удалось загрузить приложения. Открой брандмауэр заново.":"Загрузка приложений…");
                 empty.setGravity(Gravity.CENTER);
                 empty.setLayoutParams(new android.widget.AbsListView.LayoutParams(-1,dp(68)));
                 return empty;
@@ -1875,7 +1976,9 @@ public final class MainActivity extends Activity {
         }
     }
     private boolean writeRule(InstalledApp app,String mode) {
-        Config.Settings settings=config.read();
+        Config.Settings settings;
+        try { settings=config.read(); }
+        catch(Config.ReadFailure e) { showConfigError(); return false; }
         Map<String,String> rules=new HashMap<>(settings.rules());
         if(mode.equals(Config.PROXY)) rules.remove(app.pkg()); else rules.put(app.pkg(),mode);
         if(config.appScope().selectedOnly() && !hasScopedApps(config.included(),rules)) {
@@ -1973,7 +2076,7 @@ public final class MainActivity extends Activity {
         settingToggle(controls,"Уведомление в шторке","Статус подключения",notifications,()-> {
             Intent intent=new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName());
-            startActivity(intent);
+            openActivity(intent,"Настройки уведомлений недоступны");
         });
         settingToggle(controls,"DNS через прокси","Шифрованные запросы по маршруту приложения",!config.enabled("dnsDirect",false),()->openPage("dns"));
         add(body,controls,-2,0);
@@ -1991,8 +2094,12 @@ public final class MainActivity extends Activity {
         design.weight(usage,trafficStat("Отдано",R.drawable.fig_up,SKY,up));
         add(body,usage,-2,16);
         data.execute(()->{
-            History.Chart week=history.chart(1440,7);
-            ui.post(()->{down.setText(size(week.totalDown())); up.setText(size(week.totalUp()));});
+            try {
+                History.Chart week=history.chart(1440,7);
+                ui.post(()->{down.setText(size(week.totalDown())); up.setText(size(week.totalUp()));});
+            } catch(android.database.sqlite.SQLiteException e) {
+                ui.post(()->{down.setText("Недоступно"); up.setText("Недоступно");});
+            }
         });
         TextView version=t("ProxyRoute · версия " + BuildConfig.VERSION_NAME,12,FAINT,400); version.setGravity(Gravity.CENTER);
         add(body,version,-2,24);
@@ -2020,7 +2127,7 @@ public final class MainActivity extends Activity {
             String label=resolve.serviceInfo.applicationInfo.loadLabel(pm).toString();
             Intent launch=pm.getLaunchIntentForPackage(pkg);
             if(apps.getChildCount()>0)design.separator(apps);
-            settingRow(apps,label,pkg,null,launch==null?null:()->startActivity(launch));
+            settingRow(apps,label,pkg,null,launch==null?null:()->openActivity(launch,"Не удалось открыть VPN-приложение"));
         }
         if(apps.getChildCount()==0)settingRow(apps,"Открыть настройки Android","Установленные VPN и рабочие профили",null,
                 ()->openSettings(Settings.ACTION_VPN_SETTINGS));

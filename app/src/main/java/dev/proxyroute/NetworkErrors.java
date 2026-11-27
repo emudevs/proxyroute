@@ -6,6 +6,14 @@ final class NetworkErrors {
     record Detail(String code,String title,String hint) {}
     static Detail describe(String message) {
         String value=message==null?"":message.toLowerCase(Locale.ROOT);
+        switch(value) {
+            case "config_read": return new Detail("CONFIG_READ","Настройки недоступны","Повтори чтение настроек. Сохранённые профили и правила не изменены.");
+            case "credentials_read": return new Detail("CREDENTIALS_READ","Данные для входа недоступны","Открой профиль и заново введи логин и пароль.");
+            case "profile_missing": return new Detail("PROFILE_MISSING","Выбранный прокси недоступен","Выбери сохранённый сервер на вкладке «Серверы».");
+            case "app_scope": return new Detail("APP_SCOPE","Не выбраны приложения для VPN","Выбери установленные приложения в брандмауэре.");
+            case "native_start": return new Detail("NATIVE_START","Сетевой модуль недоступен","Переустанови подписанную сборку поверх текущей версии.");
+            case "foreground_start": return new Detail("FOREGROUND_START","Android не запустил VPN","Открой ProxyRoute и повтори подключение.");
+        }
         if(value.equals("proxy_auth")) value="authentication";
         if(value.equals("vpn_permission")) value="permission";
         if(value.contains("407") || value.contains("authentication"))
@@ -29,7 +37,7 @@ final class NetworkErrors {
         return new Detail("CONNECTION","Не удалось подключиться","Проверь маршрут, адрес и протокол. Код ошибки есть в выгрузке журнала.");
     }
     static boolean failed(String result) {
-        return switch(result) {
+        return switch(result==null?"":result) {
             case "active","closed","VPN stopped","process stopped","blocked by application rule","blocked by DNS filter" -> false;
             default -> true;
         };

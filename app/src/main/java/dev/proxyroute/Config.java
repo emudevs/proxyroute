@@ -34,6 +34,12 @@ final class Config {
     static final String PROXY = "proxy", BLOCK = "block", DIRECT = "direct", BYPASS = "bypass";
     static final String FIREWALL = "firewall";
     private static final String KEY = "proxyroute.credentials.v1";
+    static final class ReadFailure extends IllegalStateException {
+        ReadFailure(Throwable cause) { super("Не удалось прочитать настройки ProxyRoute", cause); }
+    }
+    static final class CredentialsFailure extends java.security.GeneralSecurityException {
+        CredentialsFailure(Throwable cause) { super("Не удалось открыть сохранённые данные прокси", cause); }
+    }
 
     record Profile(String id, String title, String protocol, String host, int port, String secret) {
         String label() { return title.trim().isEmpty() ? host + ":" + port : title; }
@@ -87,16 +93,20 @@ final class Config {
             if (profiles != null) {
                 for (int i = 0; i < profiles.length(); i++) {
                     JSONObject p = profiles.getJSONObject(i);
-                    result.add(new Profile(p.getString("id"), p.getString("title"), p.getString("protocol"),
-                            p.getString("host"), p.getInt("port"), p.getString("secret")));
+                    String protocol=p.getString("protocol");
+                    int port=p.getInt("port");
+                    if (!List.of("http","https","socks5").contains(protocol) || port<1 || port>65535)
+                        throw new JSONException("Invalid proxy profile");
+                    result.add(new Profile(p.getString("id"), p.getString("title"), protocol,
+                            p.getString("host"), port, p.getString("secret")));
                 }
             }
             Map<String,String> rules = new LinkedHashMap<>();
             JSONObject entries = data.optJSONObject("rules");
             if (entries != null) entries.keys().forEachRemaining(pkg -> rules.put(pkg, entries.optString(pkg)));
             return new Settings(Collections.unmodifiableList(result), data.optString("selected", FIREWALL), Collections.unmodifiableMap(rules));
-        } catch (JSONException e) {
-            throw new IllegalStateException("Не удалось прочитать настройки VPN", e);
+        } catch (JSONException | ClassCastException e) {
+            throw new ReadFailure(e);
         }
     }
 
@@ -138,13 +148,18 @@ final class Config {
                 title.trim(), protocol, host, port, secret);
     }
 
-    static Credentials credentials(Profile profile) throws Exception {
+    static Credentials credentials(Profile profile) throws CredentialsFailure {
         if (profile == null || profile.secret.isEmpty()) return new Credentials("", "");
-        String[] parts = profile.secret.split("\\.", 2);
-        Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
-        cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, decode(parts[0])));
-        JSONArray values = new JSONArray(new String(cipher.doFinal(decode(parts[1])), StandardCharsets.UTF_8));
-        return new Credentials(values.getString(0), values.getString(1));
+        try {
+            String[] parts = profile.secret.split("\\.", 2);
+            if (parts.length != 2) throw new IllegalArgumentException("Invalid credentials format");
+            Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+            cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, decode(parts[0])));
+            JSONArray values = new JSONArray(new String(cipher.doFinal(decode(parts[1])), StandardCharsets.UTF_8));
+            return new Credentials(values.getString(0), values.getString(1));
+        } catch (Exception e) {
+            throw new CredentialsFailure(e);
+        }
     }
 
     static List<String> addresses(Context context, String host) throws Exception {
