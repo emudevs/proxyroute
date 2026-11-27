@@ -41,13 +41,15 @@ Windows requirements include Go 1.24.4, JDK 17 or 21, Gradle 8.13, Android SDK p
 powershell -ExecutionPolicy Bypass -File .\build-release.ps1 -RequireExistingKey
 ~~~
 
-The script produces `dist/ProxyRoute-1.0.0.apk` and verifies its signature and alignment. Official builds require the persistent signing identity in `%LOCALAPPDATA%\ProxyRouteBuild\signing`. Back up the signing key and its password through your private backup process. For a local test build, run `build-native.ps1` and then `gradle :app:assembleDebug`. Keep the public GitHub release signed with the official certificate.
+The script produces `dist/ProxyRoute-<version>.apk` and verifies its signature and alignment. Official builds require the persistent signing identity in `%LOCALAPPDATA%\ProxyRouteBuild\signing`. Back up the signing key and its password through your private backup process. For a local test build, run `build-native.ps1` and then `gradle :app:assembleDebug`. Keep the public GitHub release signed with the official certificate.
 
 To test the native engine on Linux, run go test -race ./... from native/. The source dependencies and Go Mobile revision are pinned. Bundled dependency licenses are in app/src/main/assets/licenses.
 
 ## Features
 
 - The server editor imports HTTP, HTTPS and SOCKS5 URLs, as well as host:port:login:password and host:port@login:password. Use brackets around IPv6 addresses. Addresses without a scheme require an explicit protocol selection.
+- Use the QR screen in the server editor to share the current connection settings. For authenticated profiles, the QR and link contain an AES-128-GCM encrypted profile with its decryption key bundled for one-step import. Treat either as a password since anyone who has it can recover the connection settings. Links made with the earlier separate-key format still import. Open a `proxyroute://import/v1` link in Android, paste it into the import screen, or open a QR image there. Imports require confirming and saving the new profile.
+- The ongoing VPN notification shows download and upload rates based on the tunnel's approximately three-second payload measurements. It returns to zero after idle.
 - The journal can export its retained records as JSON. The file contains timestamps, app names, destinations, routes, error codes and byte counts. The exporter does not read proxy credentials or configuration secrets.
 - Firewall settings include separate DNS filters for common advertising and analytics domains and an optional Wi-Fi-only proxy mode. On mobile, Wi-Fi-only mode falls back to the direct tunnel with app rules intact. The bundled filters apply to Android resolver requests handled by ProxyRoute. Domains resolved independently by apps, tunneled connections addressed by IP, and traffic outside the VPN can bypass DNS filtering.
 - Choose All apps or Selected only in Firewall → Apps. Set each app’s route in its rule. Explicitly blocked packages are still captured in Selected only mode so their firewall rules apply. Excluded packages are outside the VPN.

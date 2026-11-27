@@ -38,6 +38,8 @@ public final class RouteService extends VpnService {
     static final String DISCONNECT = "dev.proxyroute.DISCONNECT";
     private static final String CHANNEL = "tunnel";
     private static final int NOTIFICATION = 42;
+    private static final int SAMPLE_SECONDS = 3;
+    private static final long SPEED_TIMEOUT_MS = 4500;
     static volatile RouteService instance;
     static volatile Session session = new Session();
     static final class Session {
@@ -62,6 +64,8 @@ public final class RouteService extends VpnService {
     private Network tunnelNetwork;
     private boolean wifiFallback;
     private boolean observingNetwork;
+    private String noticeSpeed = "";
+    private final Runnable resetNoticeSpeed = () -> showRate(0, 0);
     private final ConnectivityManager.NetworkCallback networkChanges = new ConnectivityManager.NetworkCallback() {
         @Override public void onAvailable(Network network) { refreshNetwork(); }
         @Override public void onLost(Network network) { refreshNetwork(); }
@@ -255,6 +259,7 @@ public final class RouteService extends VpnService {
 
     @Override public void onDestroy() {
         wanted = false;
+        main.removeCallbacks(resetNoticeSpeed);
         if(observingNetwork)networks.unregisterNetworkCallback(networkChanges);
         if (instance == this) instance = null;
         worker.execute(() -> {
@@ -271,10 +276,42 @@ public final class RouteService extends VpnService {
         if (!wanted) return;
         updateStatus(change);
         main.post(() -> {
-            if (wanted && instance == this) {
-                getSystemService(NotificationManager.class).notify(NOTIFICATION, notification(change.message()));
-            }
+            if (!wanted || instance != this || status != change) return;
+            noticeSpeed = "";
+            main.removeCallbacks(resetNoticeSpeed);
+            refreshNotification(change, change.connected() && !change.busy() ? speedText(0, 0) : "");
         });
+    }
+
+    private void trafficSample(Session counters, long sent, long received) {
+        main.post(() -> {
+            if (!wanted || instance != this || !status.connected() || status.busy() || session != counters) return;
+            showRate(sent / (double) SAMPLE_SECONDS, received / (double) SAMPLE_SECONDS);
+            main.removeCallbacks(resetNoticeSpeed);
+            main.postDelayed(resetNoticeSpeed, SPEED_TIMEOUT_MS);
+        });
+    }
+
+    private void showRate(double up, double down) {
+        Status current = status;
+        if (!wanted || instance != this || !current.connected() || current.busy()) return;
+        String speed = speedText(up, down);
+        if (!speed.equals(noticeSpeed)) refreshNotification(current, speed);
+    }
+
+    private void refreshNotification(Status current, String speed) {
+        noticeSpeed = speed;
+        getSystemService(NotificationManager.class).notify(NOTIFICATION, notification(current.message(), speed));
+    }
+
+    private static String speedText(double up, double down) {
+        return "↓ " + rate(down) + "   ↑ " + rate(up);
+    }
+
+    private static String rate(double value) {
+        if (value < 1024) return String.format(java.util.Locale.getDefault(), "%.0f Б/с", value);
+        if (value < 1024 * 1024) return String.format(java.util.Locale.getDefault(), "%.1f КиБ/с", value / 1024);
+        return String.format(java.util.Locale.getDefault(), "%.1f МиБ/с", value / (1024 * 1024));
     }
 
     static final String STATUS_CHANGED="dev.proxyroute.STATUS_CHANGED";
@@ -299,10 +336,15 @@ public final class RouteService extends VpnService {
     }
 
     private Notification notification(String message) {
+        return notification(message, "");
+    }
+
+    private Notification notification(String message, String speed) {
         Notification.Builder builder = new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_route).setContentTitle("ProxyRoute")
-                .setContentText(message).setContentIntent(openApp()).setOngoing(true)
+                .setContentText(speed.isEmpty() ? message : speed).setContentIntent(openApp()).setOngoing(true)
                 .setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE);
+        if (!speed.isEmpty()) builder.setStyle(new Notification.BigTextStyle().bigText(speed + "\n" + message));
         if (!isAlwaysOn()) {
             builder.addAction(new Notification.Action.Builder(null, "Отключить",
                     PendingIntent.getService(this, 2, new Intent(this, RouteService.class).setAction(DISCONNECT),
@@ -406,6 +448,7 @@ public final class RouteService extends VpnService {
             counters.up.addAndGet(sent);
             counters.down.addAndGet(received);
             history.traffic(sent, received);
+            trafficSample(counters, sent, received);
         }
     }
 }

@@ -5,6 +5,8 @@ import android.animation.ValueAnimator;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.BroadcastReceiver;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.IntentFilter;
 import android.content.Intent;
@@ -12,6 +14,9 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
 import android.graphics.Canvas;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.graphics.ImageDecoder;
 import android.graphics.Paint;
 import android.net.VpnService;
 import android.os.Build;
@@ -39,6 +44,13 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
+import com.google.zxing.BarcodeFormat;
+import com.google.zxing.BinaryBitmap;
+import com.google.zxing.DecodeHintType;
+import com.google.zxing.MultiFormatReader;
+import com.google.zxing.RGBLuminanceSource;
+import com.google.zxing.common.HybridBinarizer;
+
 import dev.proxyroute.nativecore.tunnel.Tunnel;
 
 import java.text.DateFormat;
@@ -57,7 +69,7 @@ import java.util.concurrent.Executors;
 import static dev.proxyroute.FigmaUi.*;
 
 public final class MainActivity extends Activity {
-    private static final int VPN_REQUEST=201, EXPORT_REQUEST=203;
+    private static final int VPN_REQUEST=201, EXPORT_REQUEST=203, QR_IMAGE_REQUEST=204;
     private static final String[] TABS={"Серверы","Журнал","Брандмауэр","Настройки"};
     private static final int[] TAB_ICONS={R.drawable.fig_servers,R.drawable.fig_log,R.drawable.fig_firewall,R.drawable.fig_settings};
     private static final String[] PROTOCOLS={"http","https","socks5"};
@@ -76,6 +88,8 @@ public final class MainActivity extends Activity {
     private FrameLayout frame;
     private LinearLayout editPage;
     private Runnable returnToEdit;
+    private Runnable fromLinkAction;
+    private EditText importField;
     private JournalAdapter journalAdapter;
     private final Map<String,CachedReport> journalCache=new java.util.LinkedHashMap<>();
     private final android.util.LruCache<String,android.graphics.Bitmap> appIcons=new android.util.LruCache<>(96);
@@ -131,7 +145,35 @@ public final class MainActivity extends Activity {
         root.addView(nav,new LinearLayout.LayoutParams(-1,dp(76)));
         setContentView(root);
         render();
+        if(state==null) consumeProxyLink(getIntent());
         frame.post(this::fetchApps);
+    }
+
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        consumeProxyLink(intent);
+    }
+
+    private void consumeProxyLink(Intent intent) {
+        if(intent==null || !Intent.ACTION_VIEW.equals(intent.getAction()) || intent.getData()==null)return;
+        String value=intent.getDataString();
+        if(!ProxyShare.matches(value))return;
+        try { ProxyShare.parse(value); }
+        catch(IllegalArgumentException e) {
+            Toast.makeText(this,"Некорректная ссылка ProxyRoute",Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Runnable open=()->{
+            tab=0;
+            edit(null);
+            if(fromLinkAction!=null)fromLinkAction.run();
+            if(importField!=null)importField.setText(value);
+        };
+        if(section.equals("edit") || section.equals("import") || section.equals("qr")) {
+            new AlertDialog.Builder(this).setTitle("Импорт нового прокси")
+                    .setMessage("Текущие несохранённые изменения будут сброшены.")
+                    .setNegativeButton("Отмена",null).setPositiveButton("Импортировать",(d,w)->open.run()).show();
+        } else open.run();
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
@@ -165,7 +207,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onBackPressed() {
         if(section.equals("dnsCustom")) {openPage("dns"); return;}
-        if(section.equals("import") && returnToEdit!=null) { returnToEdit.run(); return; }
+        if(returnToEdit!=null) { returnToEdit.run(); return; }
         if (!section.isEmpty()) { closePage(); return; }
         if (tab==1 && searchingHistory) { searchingHistory=false; eventQuery=""; offset=0; render(); return; }
         if (tab==0 && searching) { searching=false; query=""; render(); return; }
@@ -262,6 +304,10 @@ public final class MainActivity extends Activity {
 
     @Override protected void onActivityResult(int request, int result, Intent payload) {
         super.onActivityResult(request, result, payload);
+        if(request==QR_IMAGE_REQUEST && result==RESULT_OK && payload!=null && payload.getData()!=null) {
+            readQr(payload.getData());
+            return;
+        }
         if (request == VPN_REQUEST && result == RESULT_OK) connect();
         if (request == EXPORT_REQUEST && result == RESULT_OK && payload!=null && payload.getData()!=null) {
             var uri=payload.getData();
@@ -275,6 +321,39 @@ public final class MainActivity extends Activity {
                 }
             });
         }
+    }
+
+    private void readQr(android.net.Uri uri) {
+        EditText destination=importField;
+        if(destination==null)return;
+        appLoader.execute(()->{
+            String decoded;
+            try {
+                Bitmap bitmap=ImageDecoder.decodeBitmap(ImageDecoder.createSource(getContentResolver(),uri),
+                        (decoder,info,source)->{
+                            decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                            int width=info.getSize().getWidth(), height=info.getSize().getHeight();
+                            double ratio=Math.min(1,1800.0/Math.max(width,height));
+                            decoder.setTargetSize(Math.max(1,(int)(width*ratio)),Math.max(1,(int)(height*ratio)));
+                        });
+                int width=bitmap.getWidth(),height=bitmap.getHeight();
+                int[] pixels=new int[width*height];
+                bitmap.getPixels(pixels,0,width,0,0,width,height);
+                bitmap.recycle();
+                var binary=new BinaryBitmap(new HybridBinarizer(new RGBLuminanceSource(width,height,pixels)));
+                decoded=new MultiFormatReader().decode(binary,Map.of(DecodeHintType.POSSIBLE_FORMATS,
+                        List.of(BarcodeFormat.QR_CODE),DecodeHintType.TRY_HARDER,true)).getText();
+            } catch(Exception e) {
+                ui.post(()->{if(importField==destination)destination.setError("QR-код на изображении не найден");});
+                return;
+            }
+            ui.post(()->{
+                if(importField==destination) {
+                    destination.setError(null);
+                    destination.setText(decoded);
+                }
+            });
+        });
     }
 
     private void connect() {
@@ -434,7 +513,7 @@ public final class MainActivity extends Activity {
     }
     private void closePage() {
         if(getCurrentFocus()!=null)hideKeyboard(getCurrentFocus());
-        editPage=null; returnToEdit=null;
+        editPage=null; returnToEdit=null; importField=null; fromLinkAction=null;
         section="";
         runningRule=null;
         render();
@@ -725,7 +804,13 @@ public final class MainActivity extends Activity {
         gap(fromLink,6);
         fromLink.addView(t("Из ссылки",14,LIME,500));
         fromLink.setMinimumHeight(dp(40));
-        pageHeader(previous==null?"Новый сервер":"Настройки сервера",true,fromLink,this::closePage);
+        LinearLayout actions=design.row();
+        actions.addView(fromLink);
+        gap(actions,6);
+        FrameLayout qr=icon(R.drawable.fig_qr,LIME,TILE,40,20,100,null,null);
+        qr.setContentDescription("QR-код подключения");
+        actions.addView(qr);
+        pageHeader(previous==null?"Новый сервер":"Настройки сервера",true,actions,this::closePage);
         LinearLayout body=scrollContent(8,24);
         int[] protocol={previous==null?2:java.util.Arrays.asList(PROTOCOLS).indexOf(previous.protocol())};
         String[] ports={"8080","443","1080"};
@@ -805,6 +890,15 @@ public final class MainActivity extends Activity {
         java.util.concurrent.Callable<Config.Profile> profile=()->Config.create(previous,name.getText().toString(),PROTOCOLS[protocol[0]],
                 host.getText().toString(),Integer.parseInt(port.getText().toString()),
                 auth[0]?user.getText().toString():"",auth[0]?pass.getText().toString():"");
+        design.action(qr,TILE,100,0,()->{
+            try {
+                boolean encrypted=auth[0] && (user.length()>0 || pass.length()>0);
+                Config.Profile endpoint=profile.call();
+                showShareCode(endpoint,encrypted);
+            } catch(NumberFormatException e) { showError.accept("Укажи порт от 1 до 65535"); }
+            catch(IllegalArgumentException e) { showError.accept(e.getMessage()); }
+            catch(Exception e) { showError.accept("Не удалось подготовить профиль для QR-кода"); }
+        });
         TextView test=design.pill("Тест",14,LIME,TILE,36,null);
         design.action(test,TILE,100,0,()-> {
             Config.Profile candidate;
@@ -850,7 +944,7 @@ public final class MainActivity extends Activity {
         add(footer,save,56,0);
         if(previous!=null) add(footer,design.pill("Удалить сервер",14,ROSE,PANEL,40,()->delete(previous)),40,8);
         add(page,footer,-2,0);
-        design.action(fromLink,TILE,100,0,()->importPage((parsed,choice)-> {
+        fromLinkAction=()->importPage((parsed,choice)-> {
             protocol[0]=choice;
             fillProtocol[0].run();
             host.setText(parsed.host());
@@ -859,18 +953,107 @@ public final class MainActivity extends Activity {
             pass.setText(parsed.password());
             auth[0]=!parsed.user().isEmpty() || !parsed.password().isEmpty();
             refreshAuth.run();
-        }));
+        });
+        design.action(fromLink,TILE,100,0,fromLinkAction);
     }
 
-    private void importPage(java.util.function.BiConsumer<ProxyLink,Integer> apply) {
+    private void showShareCode(Config.Profile endpoint,boolean encrypted) {
+        LinearLayout editor=page;
+        appLoader.execute(()->{
+            try {
+                Config.Credentials auth=Config.credentials(endpoint);
+                String link=ProxyShare.create(new ProxyLink(endpoint.protocol(),endpoint.host(),endpoint.port(),
+                        auth.user(),auth.password()),encrypted);
+                var logo=getDrawable(R.drawable.ic_launcher_foreground);
+                Bitmap bitmap=ShareQr.render(link,logo);
+                ui.post(()->{
+                    if(page!=editor || !section.equals("edit") || isDestroyed()) {
+                        bitmap.recycle();
+                        return;
+                    }
+                    renderShareCode(endpoint,encrypted,link,bitmap);
+                });
+            } catch(Exception e) {
+                ui.post(()->{
+                    if(page==editor && section.equals("edit") && !isDestroyed())
+                        Toast.makeText(this,e instanceof IllegalArgumentException?e.getMessage():
+                                "Не удалось создать читаемый QR-код. Проверь длину данных сервера.",Toast.LENGTH_LONG).show();
+                });
+            }
+        });
+    }
+
+    private void renderShareCode(Config.Profile endpoint,boolean encrypted,String link,Bitmap bitmap) {
+        openEditorScreen("qr");
+        pageHeader("QR-код подключения",false,null,()->returnToEdit.run());
+        LinearLayout body=scrollContent(12,20);
+        LinearLayout card=panel(28);
+        design.pad(card,18,18);
+        LinearLayout titleRow=design.row();
+        titleRow.addView(icon(encrypted?R.drawable.fig_lock:R.drawable.fig_servers,LIME,TILE,40,20,12,null,null));
+        gap(titleRow,12);
+        LinearLayout labels=design.column();
+        String protocol=endpoint.protocol().toUpperCase(Locale.ROOT);
+        TextView title=t(endpoint.title().isEmpty()?protocol:endpoint.title(),17,TEXT,600);
+        ellipsize(title);
+        add(labels,title,-2,0);
+        String host=endpoint.host().contains(":")?"["+endpoint.host()+"]":endpoint.host();
+        TextView address=design.terminal(host+":"+endpoint.port(),12,MUTED);
+        ellipsize(address);
+        add(labels,address,-2,4);
+        design.weight(titleRow,labels);
+        gap(titleRow,8);
+        titleRow.addView(design.pill(protocol,11,LIME,TILE,28,null));
+        add(card,titleRow,-2,0);
+
+        ImageView image=new ImageView(this);
+        image.setAdjustViewBounds(true);
+        image.setImageBitmap(bitmap);
+        image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        if(image.getDrawable() instanceof android.graphics.drawable.BitmapDrawable d) d.setFilterBitmap(false);
+        image.setContentDescription("QR-код подключения");
+        FrameLayout plate=new FrameLayout(this);
+        design.surface(plate,Color.WHITE,22);
+        plate.setClipToOutline(true);
+        int qrSide=Math.min(320,Math.max(1,getResources().getConfiguration().screenWidthDp-68));
+        plate.addView(image,new FrameLayout.LayoutParams(-1,-1));
+        LinearLayout.LayoutParams plateLayout=new LinearLayout.LayoutParams(dp(qrSide),dp(qrSide));
+        plateLayout.gravity=Gravity.CENTER_HORIZONTAL;
+        plateLayout.topMargin=dp(18);
+        card.addView(plate,plateLayout);
+        add(body,card,-2,0);
+
+        LinearLayout guide=panel(22);
+        design.pad(guide,16,14);
+        add(guide,t(encrypted?"Содержит данные для входа":"Профиль без авторизации",14,TEXT,600),-2,0);
+        add(guide,t(encrypted?"QR и ссылка дают доступ к прокси. Отправляй их только тем, с кем хочешь поделиться доступом."
+                :"Отсканируй QR или открой ссылку, чтобы заполнить профиль в ProxyRoute.",13,MUTED,400),-2,6);
+        add(body,guide,-2,14);
+        add(body,design.pill("Скопировать ссылку",15,BG,LIME,52,
+                ()->copyShareValue(link,encrypted)),52,16);
+        animatePage(dp(20),0,220);
+    }
+
+    private void copyShareValue(String value,boolean sensitive) {
+        ClipData clip=ClipData.newPlainText("ProxyRoute",value);
+        if(sensitive) {
+            android.os.PersistableBundle extras=new android.os.PersistableBundle();
+            extras.putBoolean("android.content.extra.IS_SENSITIVE",true);
+            clip.getDescription().setExtras(extras);
+        }
+        getSystemService(ClipboardManager.class).setPrimaryClip(clip);
+        if(Build.VERSION.SDK_INT<33) Toast.makeText(this,"Скопировано",Toast.LENGTH_SHORT).show();
+    }
+
+    private void openEditorScreen(String screen) {
         if(getCurrentFocus()!=null)hideKeyboard(getCurrentFocus());
         editPage=page;
-        section="import";
+        section=screen;
         returnToEdit=()->{
             if(getCurrentFocus()!=null)hideKeyboard(getCurrentFocus());
             frame.removeAllViews();
             page=editPage;
-            editPage=null; returnToEdit=null;
+            editPage=null; returnToEdit=null; importField=null;
             section="edit";
             frame.addView(page,new FrameLayout.LayoutParams(-1,-1));
             animatePage(-dp(14),0,180);
@@ -878,17 +1061,22 @@ public final class MainActivity extends Activity {
         frame.removeAllViews();
         page=design.column();
         frame.addView(page,new FrameLayout.LayoutParams(-1,-1));
+    }
+
+    private void importPage(java.util.function.BiConsumer<ProxyLink,Integer> apply) {
+        openEditorScreen("import");
         pageHeader("Импорт прокси",false,null,()->returnToEdit.run());
         LinearLayout body=scrollContent(10,20);
         LinearLayout help=panel(24);
         design.pad(help,16,16);
         add(help,t("Поддерживаемые форматы",16,TEXT,600),-2,0);
-        for(String example:new String[]{"socks5://логин:пароль@ip:порт","ip:port:login:password","ip:port@login:password"})
+        for(String example:new String[]{"proxyroute://import/v1?…","socks5://логин:пароль@ip:порт","ip:port:login:password","ip:port@login:password"})
             add(help,design.terminal(example,12,LIGHT),-2,8);
         add(help,t("Если в ссылке нет протокола, выбери его вручную. Для IPv6 заключи адрес в квадратные скобки.",13,MUTED,400),-2,10);
         add(body,help,-2,0);
         EditText link=design.field("Вставь ссылку или адрес прокси","",InputType.TYPE_CLASS_TEXT
                 |InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD|InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        importField=link;
         add(body,link,56,20);
         add(body,design.pill("Вставить из буфера",14,LIME,TILE,42,()->{
             var clipboard=getSystemService(android.content.ClipboardManager.class);
@@ -897,15 +1085,33 @@ public final class MainActivity extends Activity {
                 link.setText(clip.getItemAt(0).getText());
             else link.setError("В буфере нет текста");
         }),42,8);
+        add(body,design.pill("Открыть QR из изображения",14,LIME,TILE,42,()->{
+            Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE);
+            try { startActivityForResult(picker,QR_IMAGE_REQUEST); }
+            catch(android.content.ActivityNotFoundException e) { link.setError("Не удалось открыть выбор изображения"); }
+        }),42,8);
+        EditText key=design.field("Отдельный ключ", "", InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        key.setImportantForAutofill(View.IMPORTANT_FOR_AUTOFILL_NO);
+        add(body,key,48,12);
+        key.setVisibility(View.GONE);
         LinearLayout choices=design.column();
         add(body,choices,-2,16);
         TextView feedback=t("",13,MUTED,400);
         add(body,feedback,-2,10);
         int[] chosen={-1};
         ProxyLink[] parsed={null};
+        ProxyShare.Import[] protectedLink={null};
         LinearLayout footer=design.column();
         design.pad(footer,16,12);
         TextView use=design.pill("Заполнить профиль",16,BG,LIME,56,()->{
+            if(protectedLink[0]!=null) {
+                try {
+                    ProxyLink opened=protectedLink[0].open(key.getText().toString());
+                    apply.accept(opened,Arrays.asList(PROTOCOLS).indexOf(opened.protocol()));
+                    returnToEdit.run();
+                } catch(IllegalArgumentException e) { key.setError(e.getMessage()); }
+                return;
+            }
             if(parsed[0]==null || chosen[0]<0)return;
             apply.accept(parsed[0],chosen[0]);
             returnToEdit.run();
@@ -919,14 +1125,30 @@ public final class MainActivity extends Activity {
                 fieldGroup(choices,"Протокол",segment(new String[]{"HTTP","HTTPS","SOCKS5"},chosen[0],index-> {
                     chosen[0]=index; renderChoices[0].run();
                 },44),-2,0);
-            boolean ready=parsed[0]!=null && chosen[0]>=0;
+            boolean ready=(parsed[0]!=null && chosen[0]>=0) || (protectedLink[0]!=null && key.length()>0);
             use.setEnabled(ready);
             use.setAlpha(ready?1f:.45f);
         };
         listen(link,value-> {
             chosen[0]=-1;
+            parsed[0]=null;
+            protectedLink[0]=null;
+            key.setText("");
+            key.setVisibility(View.GONE);
+            key.setError(null);
             try {
-                parsed[0]=ProxyLink.parse(value);
+                if(ProxyShare.matches(value)) {
+                    ProxyShare.Import incoming=ProxyShare.parse(value);
+                    if(incoming.encrypted()) {
+                        protectedLink[0]=incoming;
+                        key.setVisibility(View.VISIBLE);
+                        feedback.setTextColor(MUTED);
+                        feedback.setText("Введи ключ, полученный отдельно от ссылки");
+                        renderChoices[0].run();
+                        return;
+                    }
+                    parsed[0]=incoming.open("");
+                } else parsed[0]=ProxyLink.parse(value);
                 String protocol=parsed[0].protocol();
                 if(protocol!=null)chosen[0]=Arrays.asList(PROTOCOLS).indexOf(protocol);
                 feedback.setTextColor(MUTED);
@@ -938,6 +1160,7 @@ public final class MainActivity extends Activity {
             }
             renderChoices[0].run();
         });
+        listen(key,value->renderChoices[0].run());
         renderChoices[0].run();
         animatePage(dp(20),0,200);
     }
