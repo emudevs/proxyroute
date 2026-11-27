@@ -439,7 +439,7 @@ public final class RouteService extends VpnService {
                 .setOnlyAlertOnce(true).setCategory(Notification.CATEGORY_SERVICE);
         if (!speed.isEmpty()) builder.setStyle(new Notification.BigTextStyle().bigText(speed + "\n" + message));
         if (!isAlwaysOn()) {
-            builder.addAction(new Notification.Action.Builder(null, "Отключить",
+            builder.addAction(new Notification.Action.Builder(null, AppLanguage.localized(this).getString(R.string.l10n_connection_disconnect),
                     PendingIntent.getService(this, 2, new Intent(this, RouteService.class).setAction(DISCONNECT),
                             PendingIntent.FLAG_IMMUTABLE)).build());
         }

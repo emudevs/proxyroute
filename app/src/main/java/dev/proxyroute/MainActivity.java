@@ -70,7 +70,8 @@ import static dev.proxyroute.FigmaUi.*;
 
 public final class MainActivity extends Activity {
     private static final int VPN_REQUEST=201, EXPORT_REQUEST=203, QR_IMAGE_REQUEST=204, DIAGNOSTICS_REQUEST=205;
-    private static final String[] TABS={"Серверы","Журнал","Брандмауэр","Настройки"};
+    private static final int[] TABS = {R.string.l10n_nav_servers, R.string.l10n_nav_log,
+            R.string.l10n_nav_firewall, R.string.l10n_nav_settings};
     private static final int[] TAB_ICONS={R.drawable.fig_servers,R.drawable.fig_log,R.drawable.fig_firewall,R.drawable.fig_settings};
     private static final String[] PROTOCOLS={"http","https","socks5"};
     private static final String[] FILTERS={"",Config.PROXY,Config.BLOCK,"errors"};
@@ -124,10 +125,18 @@ public final class MainActivity extends Activity {
     private record InstalledApp(String pkg,String name,String searchKey) {}
     private record Report(History.Chart graph,History.Totals totals,List<History.Connection> rows,long chartBase,int chartSpan) {}
 
+    @Override protected void attachBaseContext(Context base) {
+        super.attachBaseContext(AppLanguage.localized(base));
+    }
+
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
-        if(state!=null) { tab=state.getInt("tab"); chartPeriod=state.getInt("period"); }
+        if(state!=null) {
+            tab=state.getInt("tab");
+            chartPeriod=state.getInt("period");
+            if (state.getBoolean("languagePage")) section="language";
+        }
         config=new Config(this); history=History.get(this); design=new FigmaUi(this);
         LinearLayout root=design.column();
         root.setBackgroundColor(BG);
@@ -172,14 +181,15 @@ public final class MainActivity extends Activity {
             if(importField!=null)importField.setText(value);
         };
         if(section.equals("edit") || section.equals("import") || section.equals("qr")) {
-            new AlertDialog.Builder(this).setTitle("Импорт нового прокси")
+            new AlertDialog.Builder(this).setTitle(getString(R.string.l10n_share_import))
                     .setMessage("Текущие несохранённые изменения будут сброшены.")
-                    .setNegativeButton("Отмена",null).setPositiveButton("Импортировать",(d,w)->open.run()).show();
+                    .setNegativeButton(getString(R.string.l10n_common_cancel),null).setPositiveButton("Импортировать",(d,w)->open.run()).show();
         } else open.run();
     }
     @Override protected void onSaveInstanceState(Bundle state) {
         super.onSaveInstanceState(state);
         state.putInt("tab",tab); state.putInt("period",chartPeriod);
+        state.putBoolean("languagePage",section.equals("language"));
     }
     @Override protected void onStart() {
         super.onStart();
@@ -245,7 +255,7 @@ public final class MainActivity extends Activity {
         frame.addView(page,new FrameLayout.LayoutParams(-1,-1));
         add(page,t("Не удалось прочитать настройки ProxyRoute",21,TEXT,600),-2,0);
         add(page,t("Профили и правила сохранены на устройстве.",14,MUTED,400),-2,10);
-        add(page,design.pill("Повторить",14,BG,LIME,48,this::render),48,16);
+        add(page,design.pill(getString(R.string.l10n_common_retry),14,BG,LIME,48,this::render),48,16);
     }
 
     private void renderContent() {
@@ -278,10 +288,10 @@ public final class MainActivity extends Activity {
             FrameLayout indicator=design.iconBox(TAB_ICONS[i],i==tab?LIME:MUTED, i==tab?0x33bbf451:0,32,20,100,null,null);
             item.addView(indicator,new LinearLayout.LayoutParams(dp(64),dp(32)));
             design.gap(item,4);
-            TextView caption=design.text(TABS[i],11,i==tab?TEXT:FAINT,i==tab?600:400);
+            TextView caption=design.text(getString(TABS[i]),11,i==tab?TEXT:FAINT,i==tab?600:400);
             caption.setGravity(Gravity.CENTER);
             item.addView(caption,new LinearLayout.LayoutParams(-1,-2));
-            item.setContentDescription(TABS[i]);
+            item.setContentDescription(getString(TABS[i]));
             item.setSelected(i==tab);
             design.action(item,0,16,0,()->switchTab(index));
             nav.addView(item,new LinearLayout.LayoutParams(0,-1,1));
@@ -448,7 +458,7 @@ public final class MainActivity extends Activity {
 
     private void delete(Config.Profile profile) {
         new AlertDialog.Builder(this).setTitle("Удалить прокси " + profile.label() + "?")
-                .setNegativeButton("Отмена", null).setPositiveButton("Удалить", (d, which) -> {
+                .setNegativeButton(getString(R.string.l10n_common_cancel), null).setPositiveButton(getString(R.string.l10n_common_delete), (d, which) -> {
                     Config.Settings settings;
                     try { settings=config.read(); }
                     catch(Config.ReadFailure e) { showConfigError(); return; }
@@ -533,7 +543,7 @@ public final class MainActivity extends Activity {
         LinearLayout row=design.row();
         design.pad(row,12,0);
         FrameLayout button=icon(close?R.drawable.fig_close:R.drawable.fig_chevron,LIGHT,TILE,40,20,100,
-                close?"Закрыть":"Назад",back);
+                close?getString(R.string.l10n_common_close):getString(R.string.l10n_common_back),back);
         if(!close) button.getChildAt(0).setRotation(180);
         row.addView(button); gap(row,12);
         TextView name=t(title,20,TEXT,600);
@@ -598,7 +608,7 @@ public final class MainActivity extends Activity {
         if(searching) {
             LinearLayout searchBar=design.row();
             design.pad(searchBar,16,0);
-            EditText field=searchField("Имя, адрес или протокол",query,value->{query=value; renderRows();});
+            EditText field=searchField(getString(R.string.l10n_server_search_hint),query,value->{query=value; renderRows();});
             design.weight(searchBar,field);
             field.setMinimumHeight(dp(48));
             gap(searchBar,8);
@@ -614,7 +624,7 @@ public final class MainActivity extends Activity {
                             .showSoftInput(field,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);});
             }
         } else {
-            header("Серверы",icon(R.drawable.fig_search,LIGHT,TILE,40,20,100,"Поиск серверов",()->{
+            header(getString(R.string.l10n_nav_servers),icon(R.drawable.fig_search,LIGHT,TILE,40,20,100,getString(R.string.l10n_server_search),()->{
                 searching=true; render();
             }));
         }
@@ -629,7 +639,7 @@ public final class MainActivity extends Activity {
         design.action(verify,0,14,0,this::checkAll);
         verify.addView(design.icon(R.drawable.fig_bolt,LIME),new LinearLayout.LayoutParams(dp(16),dp(16)));
         gap(verify,4);
-        verify.addView(t("Проверить",14,LIME,500));
+        verify.addView(t(getString(R.string.l10n_server_check),14,LIME,500));
         sectionRow.addView(verify);
         add(content,sectionRow,26,20);
         serverRows=design.column();
@@ -637,7 +647,7 @@ public final class MainActivity extends Activity {
         updateHero();
         renderRows();
         if(searching) return;
-        FrameLayout fab=icon(R.drawable.fig_plus,BG,LIME,56,24,100,"Добавить сервер",()->edit(null));
+        FrameLayout fab=icon(R.drawable.fig_plus,BG,LIME,56,24,100,getString(R.string.l10n_server_add),()->edit(null));
         fab.setElevation(dp(7));
         FrameLayout.LayoutParams fabPosition=new FrameLayout.LayoutParams(dp(56),dp(56),Gravity.BOTTOM|Gravity.RIGHT);
         fabPosition.rightMargin=dp(16);
@@ -692,12 +702,12 @@ public final class MainActivity extends Activity {
             gap(stateRow,8);
             boolean error=vpn.message().startsWith("Ошибка");
             boolean stopping=vpn.busy() && vpn.message().startsWith("Отключение");
-            TextView statusText=t(vpn.busy()?(stopping?"ОТКЛЮЧЕНИЕ":"ПОДКЛЮЧЕНИЕ"):error?"ОШИБКА VPN":proxyFailed?"ПРОКСИ НЕДОСТУПЕН":on?(firewall?"ТОЛЬКО ФИЛЬТРАЦИЯ":"ЗАЩИЩЕНО"):"ОТКЛЮЧЕНО",
+            TextView statusText=t(vpn.busy()?(stopping?getString(R.string.l10n_connection_disconnecting):getString(R.string.l10n_connection_connecting)):error?getString(R.string.l10n_connection_vpn_error):proxyFailed?getString(R.string.l10n_connection_proxy_unreachable):on?(firewall?getString(R.string.l10n_connection_filter_only):getString(R.string.l10n_connection_protected)):getString(R.string.l10n_connection_disconnected),
                     12,error&&!on?ROSE:secondary,500);
             statusText.setLetterSpacing(.1f);
             stateRow.addView(statusText);
             titles.addView(stateRow);
-            TextView heroName=t(profile==null?"Только брандмауэр":profile.label(),24,primary,600);
+            TextView heroName=t(profile==null?getString(R.string.l10n_connection_filter_only):profile.label(),24,primary,600);
             ellipsize(heroName);
             add(titles,heroName,-2,8);
             TextView heroAddress=design.terminal(error||fallback?vpn.message():proxyFailed?NetworkErrors.describe(lastProbe.detail()).title():firewall?(on?"Прямое соединение · фильтры активны":"Прямое соединение · без прокси"):
@@ -706,7 +716,7 @@ public final class MainActivity extends Activity {
             add(titles,heroAddress,-2,2);
             design.weight(top,titles); gap(top,12);
             FrameLayout power=icon(R.drawable.fig_power,on?accent:BG,on?BG:LIME,64,28,100,
-                    RouteService.instance==null?"Подключить VPN":"Отключить VPN",this::toggle);
+                    RouteService.instance==null?getString(R.string.l10n_connection_vpn_connect):getString(R.string.l10n_connection_vpn_disconnect),this::toggle);
             power.setEnabled(!vpn.busy());
             if(vpn.busy() || transition)power.addView(new PowerMotion(this,on?accent:BG,vpn.busy(),stopping,on),
                     new FrameLayout.LayoutParams(-1,-1));
@@ -715,7 +725,7 @@ public final class MainActivity extends Activity {
             LinearLayout metrics=design.row();
             design.pad(metrics,12,12);
             design.surface(metrics,on?0x1909090b:0x9927272a,16);
-            String[] labels={"Время","Загрузка","Отдача"};
+            String[] labels={getString(R.string.l10n_connection_elapsed),getString(R.string.l10n_traffic_download),getString(R.string.l10n_traffic_upload)};
             for(int i=0;i<labels.length;i++) {
                 LinearLayout stat=design.column();
                 stat.addView(t(labels[i],11,secondary,400));
@@ -741,7 +751,7 @@ public final class MainActivity extends Activity {
         Config.Settings state=config.read();
         serverRows.removeAllViews();
         checkViews.clear();
-        if(matches("Только брандмауэр direct",query)) serverRow(null,state.selected());
+        if(matches(getString(R.string.l10n_connection_filter_only)+" direct",query)) serverRow(null,state.selected());
         for(Config.Profile profile:state.profiles()) {
             if(java.util.Arrays.stream(query.trim().toLowerCase(Locale.ROOT).split("\\s+")).allMatch(term->matches(profile.label()+" "+address(profile)+" "+profile.protocol(),term))) serverRow(profile,state.selected());
         }
@@ -771,7 +781,7 @@ public final class MainActivity extends Activity {
         }
         gap(row,12);
         LinearLayout info=design.column();
-        TextView name=t(fw?"Только брандмауэр":profile.label(),16,TEXT,500);
+        TextView name=t(fw?getString(R.string.l10n_connection_filter_only):profile.label(),16,TEXT,500);
         ellipsize(name); info.addView(name);
         LinearLayout detail=design.row();
         String protocol=fw?"DIRECT":profile.protocol().toUpperCase(Locale.ROOT);
@@ -800,7 +810,7 @@ public final class MainActivity extends Activity {
     private void updateServerHeading() {
         if(serverHeading==null || tab!=0 || !section.isEmpty()) return;
         boolean pending=checks.values().stream().anyMatch(probe->probe.detail().equals("Проверяем…"));
-        serverHeading.setText(pending?"Проверка статуса…":"Серверы · "+(config.read().profiles().size()+1));
+        serverHeading.setText(pending?getString(R.string.l10n_server_checking):getString(R.string.l10n_nav_servers)+" · "+(config.read().profiles().size()+1));
     }
     private void showProbe(Config.Profile p) {
         TextView view=checkViews.get(p.id());
@@ -810,7 +820,7 @@ public final class MainActivity extends Activity {
             if(probe==null || !probe.profile().equals(p)) { view.setText("—"); view.setTextColor(FAINT); }
             else if(probe.detail().equals("Проверяем…")) { view.setText("···"); view.setTextColor(MUTED); }
             else if(!probe.ok()) {
-                view.setText("Офлайн");
+                view.setText(getString(R.string.l10n_server_offline));
                 view.setTextColor(ROSE);
                 view.setOnClickListener(v->showNetworkError(probe.detail(),()->check(p,true)));
             }
@@ -828,7 +838,7 @@ public final class MainActivity extends Activity {
     private void showNetworkError(String error,Runnable retry) {
         NetworkErrors.Detail detail=NetworkErrors.describe(error);
         new AlertDialog.Builder(this).setTitle(detail.title()).setMessage(detail.hint()+"\nКод: "+detail.code())
-                .setNegativeButton("Закрыть",null).setPositiveButton("Повторить",(dialog,which)->retry.run()).show();
+                .setNegativeButton(getString(R.string.l10n_common_close),null).setPositiveButton(getString(R.string.l10n_common_retry),(dialog,which)->retry.run()).show();
     }
 
     private void fieldGroup(LinearLayout parent,String label,View field,int height,int top) {
@@ -873,18 +883,18 @@ public final class MainActivity extends Activity {
         actions.addView(fromLink);
         gap(actions,6);
         FrameLayout qr=icon(R.drawable.fig_qr,LIME,TILE,40,20,100,null,null);
-        qr.setContentDescription("QR-код подключения");
+        qr.setContentDescription(getString(R.string.l10n_share_qr));
         actions.addView(qr);
-        pageHeader(previous==null?"Новый сервер":"Настройки сервера",true,actions,this::closePage);
+        pageHeader(previous==null?getString(R.string.l10n_server_new):getString(R.string.l10n_server_settings),true,actions,this::closePage);
         if (previous != null) {
-            add(page,design.pill("Состояние прокси",14,LIME,PANEL,40,() -> showPerformance(previous.id())),40,8);
+            add(page,design.pill(getString(R.string.l10n_diagnostics_status),14,LIME,PANEL,40,() -> showPerformance(previous.id())),40,8);
         }
         LinearLayout body=scrollContent(8,24);
         int[] protocol={previous==null?2:java.util.Arrays.asList(PROTOCOLS).indexOf(previous.protocol())};
         String[] ports={"8080","443","1080"};
         EditText name=design.field("Например, Frankfurt-02",previous==null?"":previous.title(),InputType.TYPE_CLASS_TEXT);
         EditText host=design.field("proxy.example.com",previous==null?(localHost==null?"":localHost):previous.host(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);
-        EditText port=design.field("Порт",previous==null?ports[protocol[0]]:Integer.toString(previous.port()),InputType.TYPE_CLASS_NUMBER);
+        EditText port=design.field(getString(R.string.l10n_server_port),previous==null?ports[protocol[0]]:Integer.toString(previous.port()),InputType.TYPE_CLASS_NUMBER);
         host.setTypeface(getResources().getFont(R.font.jetbrains_mono));
         port.setTypeface(getResources().getFont(R.font.jetbrains_mono));
         LinearLayout protocolBox=design.column();
@@ -895,14 +905,14 @@ public final class MainActivity extends Activity {
             LinearLayout choices=segment(new String[]{"HTTP","HTTPS","SOCKS5"},protocol[0],choice-> {
                 protocol[0]=choice; port.setText(ports[choice]); fillProtocol[0].run();
             },44);
-            fieldGroup(protocolBox,"Протокол",choices,-2,0);
+            fieldGroup(protocolBox,getString(R.string.l10n_server_protocol),choices,-2,0);
         };
         fillProtocol[0].run();
-        fieldGroup(body,"Название",name,56,20);
+        fieldGroup(body,getString(R.string.l10n_server_name),name,56,20);
         LinearLayout endpoints=design.row();
         LinearLayout hostField=design.column(),portField=design.column();
-        fieldGroup(hostField,"Адрес сервера",host,56,0);
-        fieldGroup(portField,"Порт",port,56,0);
+        fieldGroup(hostField,getString(R.string.l10n_server_address),host,56,0);
+        fieldGroup(portField,getString(R.string.l10n_server_port),port,56,0);
         design.weight(endpoints,hostField); gap(endpoints,12);
         endpoints.addView(portField,new LinearLayout.LayoutParams(dp(112),-2));
         add(body,endpoints,-2,20);
@@ -912,13 +922,13 @@ public final class MainActivity extends Activity {
         try { credentials=Config.credentials(previous); unreadableCredentials=false; }
         catch(Config.CredentialsFailure e) { credentials=new Config.Credentials("",""); unreadableCredentials=true; }
         boolean[] auth={previous==null||!previous.secret().isEmpty()};
-        EditText user=design.field("Логин",credentials.user(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
-        EditText pass=design.field("Пароль",credentials.password(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        EditText user=design.field(getString(R.string.l10n_server_username),credentials.user(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+        EditText pass=design.field(getString(R.string.l10n_server_password),credentials.password(),InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_PASSWORD);
         LinearLayout authCard=panel(24);
         design.pad(authCard,16,16);
         LinearLayout authRow=design.row();
         authRow.addView(icon(R.drawable.fig_lock,LIME,TILE,40,20,12,null,null)); gap(authRow,12);
-        LinearLayout names=design.column(); names.addView(t("Авторизация",14,TEXT,500)); add(names,t("Логин и пароль прокси",12,FAINT,400),-2,2);
+        LinearLayout names=design.column(); names.addView(t(getString(R.string.l10n_server_auth),14,TEXT,500)); add(names,t(getString(R.string.l10n_server_auth_hint),12,FAINT,400),-2,2);
         design.weight(authRow,names);
         LinearLayout switchBox=design.row();
         authRow.addView(switchBox);
@@ -928,14 +938,14 @@ public final class MainActivity extends Activity {
         FrameLayout password=new FrameLayout(this);
         pass.setPadding(dp(16),0,dp(44),0);
         password.addView(pass,new FrameLayout.LayoutParams(-1,-1));
-        FrameLayout eye=icon(R.drawable.fig_eye,FAINT,0,40,20,100,"Показать или скрыть пароль",()-> {
+        FrameLayout eye=icon(R.drawable.fig_eye,FAINT,0,40,20,100,getString(R.string.l10n_server_show_password),()-> {
             pass.setTransformationMethod(pass.getTransformationMethod()==null?PasswordTransformationMethod.getInstance():null);
             pass.setSelection(pass.length());
         });
         password.addView(eye,new FrameLayout.LayoutParams(dp(40),-1,Gravity.RIGHT));
         add(inputs,password,48,12);
         add(authCard,inputs,-2,16);
-        FigmaUi.Toggle authToggle=design.toggle("Авторизация",auth[0],null);
+        FigmaUi.Toggle authToggle=design.toggle(getString(R.string.l10n_server_auth),auth[0],null);
         Runnable refreshAuth=()-> {
             inputs.setVisibility(auth[0]?View.VISIBLE:View.GONE);
             authToggle.setChecked(auth[0]);
@@ -950,7 +960,7 @@ public final class MainActivity extends Activity {
         design.pad(verify,14,14);
         verify.addView(icon(R.drawable.fig_bolt,MUTED,TILE,40,20,12,null,null)); gap(verify,12);
         LinearLayout copy=design.column();
-        TextView testState=t("Проверка соединения",14,TEXT,500);
+        TextView testState=t(getString(R.string.l10n_server_connection_test),14,TEXT,500);
         TextView testDetail=t("Подключение и авторизация",12,FAINT,400);
         copy.addView(testState); add(copy,testDetail,-2,2); design.weight(verify,copy);
         TextView error=t("",13,ROSE,400);
@@ -970,27 +980,27 @@ public final class MainActivity extends Activity {
                 boolean encrypted=auth[0] && (user.length()>0 || pass.length()>0);
                 Config.Profile endpoint=profile.call();
                 showShareCode(endpoint,encrypted);
-            } catch(NumberFormatException e) { showError.accept("Укажи порт от 1 до 65535"); }
+            } catch(NumberFormatException e) { showError.accept(getString(R.string.l10n_errors_port_range)); }
             catch(IllegalArgumentException e) { showError.accept(e.getMessage()); }
             catch(Exception e) { showError.accept("Не удалось подготовить профиль для QR-кода"); }
         });
-        TextView test=design.pill("Тест",14,LIME,TILE,36,null);
+        TextView test=design.pill(getString(R.string.l10n_server_check),14,LIME,TILE,36,null);
         design.action(test,TILE,100,0,()-> {
             Config.Profile candidate;
             try { candidate=profile.call(); }
-            catch(NumberFormatException e) { showError.accept("Укажи порт от 1 до 65535"); return; }
+            catch(NumberFormatException e) { showError.accept(getString(R.string.l10n_errors_port_range)); return; }
             catch(IllegalArgumentException e) { showError.accept(e.getMessage()); return; }
             catch(Exception e) { showError.accept("Проверь адрес, порт и данные авторизации"); return; }
             error.setVisibility(View.GONE);
             test.setEnabled(false);
-            testState.setText("Проверка соединения…");
+            testState.setText(getString(R.string.l10n_server_connection_test));
             testDetail.setText("Подключение и авторизация");
             probes.execute(()->{
                 Probe result=probe(candidate);
                 ui.post(()->{
                     if(isDestroyed()||!test.isAttachedToWindow()) return;
                     test.setEnabled(true);
-                    testState.setText(result.ok()?"Сервер доступен":"Сервер недоступен");
+                    testState.setText(result.ok()?getString(R.string.l10n_server_reachable):getString(R.string.l10n_server_unreachable));
                     testDetail.setText(result.ok()?result.detail():NetworkErrors.describe(result.detail()).title());
                     if(!result.ok())showError.accept(NetworkErrors.describe(result.detail()).hint());
                     verify.setBackground(design.background(result.ok()?0x1abbf451:PANEL,16,result.ok()?0x80bbf451:TILE));
@@ -1003,7 +1013,7 @@ public final class MainActivity extends Activity {
 
         LinearLayout footer=design.column();
         design.pad(footer,16,12);
-        TextView save=design.pill("Сохранить сервер",16,BG,LIME,56,()->{
+        TextView save=design.pill(getString(R.string.l10n_server_save),16,BG,LIME,56,()->{
             try {
                 Config.Profile next=profile.call();
                 Config.Settings settings=config.read();
@@ -1019,13 +1029,13 @@ public final class MainActivity extends Activity {
                     if(selected.equals(next.id())) reconfigure();
                     check(next,true); closePage();
                 }
-            } catch(NumberFormatException e) { showError.accept("Укажи порт от 1 до 65535"); }
+            } catch(NumberFormatException e) { showError.accept(getString(R.string.l10n_errors_port_range)); }
             catch(IllegalArgumentException e) { showError.accept(e.getMessage()); }
             catch(Config.ReadFailure e) { showError.accept(e.getMessage()); }
             catch(Exception e) { showError.accept("Не удалось сохранить профиль"); }
         });
         add(footer,save,56,0);
-        if(previous!=null) add(footer,design.pill("Удалить сервер",14,ROSE,PANEL,40,()->delete(previous)),40,8);
+        if(previous!=null) add(footer,design.pill(getString(R.string.l10n_server_delete),14,ROSE,PANEL,40,()->delete(previous)),40,8);
         add(page,footer,-2,0);
         fromLinkAction=()->importPage((parsed,choice)-> {
             protocol[0]=choice;
@@ -1068,7 +1078,7 @@ public final class MainActivity extends Activity {
 
     private void renderShareCode(Config.Profile endpoint,boolean encrypted,String link,Bitmap bitmap) {
         openEditorScreen("qr");
-        pageHeader("QR-код подключения",false,null,()->returnToEdit.run());
+        pageHeader(getString(R.string.l10n_share_qr),false,null,()->returnToEdit.run());
         LinearLayout body=scrollContent(12,20);
         LinearLayout card=panel(28);
         design.pad(card,18,18);
@@ -1094,7 +1104,7 @@ public final class MainActivity extends Activity {
         image.setImageBitmap(bitmap);
         image.setScaleType(ImageView.ScaleType.FIT_CENTER);
         if(image.getDrawable() instanceof android.graphics.drawable.BitmapDrawable d) d.setFilterBitmap(false);
-        image.setContentDescription("QR-код подключения");
+        image.setContentDescription(getString(R.string.l10n_share_qr));
         FrameLayout plate=new FrameLayout(this);
         design.surface(plate,Color.WHITE,22);
         plate.setClipToOutline(true);
@@ -1108,11 +1118,11 @@ public final class MainActivity extends Activity {
 
         LinearLayout guide=panel(22);
         design.pad(guide,16,14);
-        add(guide,t(encrypted?"Содержит данные для входа":"Профиль без авторизации",14,TEXT,600),-2,0);
-        add(guide,t(encrypted?"QR и ссылка дают доступ к прокси. Отправляй их только тем, с кем хочешь поделиться доступом."
+        add(guide,t(encrypted?getString(R.string.l10n_share_contains_credentials):"Профиль без авторизации",14,TEXT,600),-2,0);
+        add(guide,t(encrypted?getString(R.string.l10n_share_warning)
                 :"Отсканируй QR или открой ссылку, чтобы заполнить профиль в ProxyRoute.",13,MUTED,400),-2,6);
         add(body,guide,-2,14);
-        add(body,design.pill("Скопировать ссылку",15,BG,LIME,52,
+        add(body,design.pill(getString(R.string.l10n_share_copy_link),15,BG,LIME,52,
                 ()->copyShareValue(link,encrypted)),52,16);
         animatePage(dp(20),0,220);
     }
@@ -1125,7 +1135,7 @@ public final class MainActivity extends Activity {
             clip.getDescription().setExtras(extras);
         }
         getSystemService(ClipboardManager.class).setPrimaryClip(clip);
-        if(Build.VERSION.SDK_INT<33) Toast.makeText(this,"Скопировано",Toast.LENGTH_SHORT).show();
+        if(Build.VERSION.SDK_INT<33) Toast.makeText(this,getString(R.string.l10n_share_copied),Toast.LENGTH_SHORT).show();
     }
 
     private void openEditorScreen(String screen) {
@@ -1148,7 +1158,7 @@ public final class MainActivity extends Activity {
 
     private void importPage(java.util.function.BiConsumer<ProxyLink,Integer> apply) {
         openEditorScreen("import");
-        pageHeader("Импорт прокси",false,null,()->returnToEdit.run());
+        pageHeader(getString(R.string.l10n_share_import),false,null,()->returnToEdit.run());
         LinearLayout body=scrollContent(10,20);
         LinearLayout help=panel(24);
         design.pad(help,16,16);
@@ -1168,7 +1178,7 @@ public final class MainActivity extends Activity {
                 link.setText(clip.getItemAt(0).getText());
             else link.setError("В буфере нет текста");
         }),42,8);
-        add(body,design.pill("Открыть QR из изображения",14,LIME,TILE,42,()->{
+        add(body,design.pill(getString(R.string.l10n_share_open_qr),14,LIME,TILE,42,()->{
             Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("image/*").addCategory(Intent.CATEGORY_OPENABLE);
             try { startActivityForResult(picker,QR_IMAGE_REQUEST); }
             catch(android.content.ActivityNotFoundException | SecurityException e) { link.setError("Не удалось открыть выбор изображения"); }
@@ -1205,7 +1215,7 @@ public final class MainActivity extends Activity {
         renderChoices[0]=()-> {
             choices.removeAllViews();
             if(parsed[0]!=null && parsed[0].protocol()==null)
-                fieldGroup(choices,"Протокол",segment(new String[]{"HTTP","HTTPS","SOCKS5"},chosen[0],index-> {
+                fieldGroup(choices,getString(R.string.l10n_server_protocol),segment(new String[]{"HTTP","HTTPS","SOCKS5"},chosen[0],index-> {
                     chosen[0]=index; renderChoices[0].run();
                 },44),-2,0);
             boolean ready=(parsed[0]!=null && chosen[0]>=0) || (protectedLink[0]!=null && key.length()>0);
@@ -1280,17 +1290,17 @@ public final class MainActivity extends Activity {
 
     private void journal() {
         LinearLayout actions=design.row();
-        actions.addView(icon(R.drawable.fig_down,LIME,TILE,40,20,100,"Выгрузить журнал",()->{
-            new AlertDialog.Builder(this).setTitle("Выгрузить журнал")
-                    .setItems(new String[]{"Обезличенная диагностика","Полный журнал"},
+        actions.addView(icon(R.drawable.fig_down,LIME,TILE,40,20,100,getString(R.string.l10n_log_export),()->{
+            new AlertDialog.Builder(this).setTitle(getString(R.string.l10n_log_export))
+                    .setItems(new String[]{getString(R.string.l10n_diagnostics_anonymous),getString(R.string.l10n_diagnostics_full)},
                             (dialog, selected) -> exportJournal(selected == 0)).show();
         }));
         gap(actions,8);
-        actions.addView(icon(R.drawable.fig_trash,LIGHT,TILE,40,20,100,"Очистить журнал",this::confirmClear));
-        header("Журнал",actions);
+        actions.addView(icon(R.drawable.fig_trash,LIGHT,TILE,40,20,100,getString(R.string.l10n_log_clear),this::confirmClear));
+        header(getString(R.string.l10n_nav_log),actions);
         LinearLayout filters=design.row();
         design.pad(filters,16,0);
-        String[] captions={"Все","Прокси","Блок","Ошибки"};
+        String[] captions={getString(R.string.l10n_common_all),getString(R.string.l10n_log_proxy),getString(R.string.l10n_log_block),getString(R.string.l10n_log_errors)};
         for(int i=0;i<captions.length;i++) {
             int index=i;
             filters.addView(design.pill(captions[i],14,i==filter?BG:LIGHT,i==filter?LIME:PANEL,36,()->{
@@ -1300,7 +1310,7 @@ public final class MainActivity extends Activity {
             gap(filters,8);
         }
         filters.addView(icon(searchingHistory?R.drawable.fig_close:R.drawable.fig_search,LIGHT,PANEL,36,18,100,
-                searchingHistory?"Закрыть поиск":"Поиск в журнале",()-> {
+                searchingHistory?"Закрыть поиск":getString(R.string.l10n_log_search),()-> {
                     searchingHistory=!searchingHistory;
                     if(!searchingHistory) { eventQuery=""; offset=0; }
                     render();
@@ -1321,7 +1331,7 @@ public final class MainActivity extends Activity {
         design.pad(graph,16,16);
         LinearLayout head=design.row(); head.setGravity(Gravity.TOP);
         LinearLayout total=design.column();
-        total.addView(t(chartPeriod==0?"Трафик за сутки":"Трафик за неделю",12,FAINT,400));
+        total.addView(t(chartPeriod==0?getString(R.string.l10n_traffic_day):getString(R.string.l10n_traffic_week),12,FAINT,400));
         graphTotal=design.terminal("0 Б",24,TEXT);
         add(total,graphTotal,-2,3);
         design.weight(head,total);
@@ -1338,7 +1348,7 @@ public final class MainActivity extends Activity {
         chart=new ChartView();
         add(graph,chart,133,16);
         LinearLayout legend=design.row();
-        legend(legend,"Загрузка",LIME); gap(legend,16); legend(legend,"Отдача",SKY);
+        legend(legend,getString(R.string.l10n_traffic_download),LIME); gap(legend,16); legend(legend,getString(R.string.l10n_traffic_upload),SKY);
         add(graph,legend,-2,10);
         add(body,graph,-2,0);
         stats=design.row();
@@ -1376,11 +1386,11 @@ public final class MainActivity extends Activity {
         LinearLayout body=panel(28);
         design.pad(body,24,24);
         body.addView(icon(R.drawable.fig_trash,ROSE,0x26ff2056,48,24,100,null,null));
-        add(body,t("Очистить журнал?",20,TEXT,600),-2,16);
+        add(body,t(getString(R.string.l10n_log_clear_confirm),20,TEXT,600),-2,16);
         add(body,t("Записи о соединениях будут удалены. График трафика сохранится.",14,MUTED,400),-2,8);
         LinearLayout options=design.row(); options.setGravity(Gravity.RIGHT);
-        options.addView(design.pill("Отмена",14,LIGHT,0,44,dialog::dismiss)); gap(options,8);
-        options.addView(design.pill("Очистить",14,TEXT,RED,44,()-> {
+        options.addView(design.pill(getString(R.string.l10n_common_cancel),14,LIGHT,0,44,dialog::dismiss)); gap(options,8);
+        options.addView(design.pill(getString(R.string.l10n_common_clear),14,TEXT,RED,44,()-> {
             dialog.dismiss();
             history.clear(()->ui.post(()->{offset=0; loadHistory(true);}),
                     ()->ui.post(()->showMessage("Не удалось очистить журнал. Повтори попытку позже.")));
@@ -1447,7 +1457,7 @@ public final class MainActivity extends Activity {
         chart.show(report);
         if(previous==null || !previous.totals().equals(report.totals())) {
             stats.removeAllViews();
-            String[] captions={"Запросов","Заблок.","Ошибок"};
+            String[] captions={getString(R.string.l10n_log_requests),"Заблок.","Ошибок"};
             long[] values={report.totals().all(),report.totals().blocked(),report.totals().errors()};
             for(int i=0;i<captions.length;i++) {
                 LinearLayout metric=panel(16);
@@ -1478,7 +1488,7 @@ public final class MainActivity extends Activity {
             if(event==null) {
                 TextView empty=recycled==null?t("",14,FAINT,400):(TextView)recycled;
                 empty.setText(error?"Не удалось загрузить журнал":displayedReport==null?"Загрузка журнала…":
-                        displayedReport.totals().all()==0?"Журнал пуст":"Подключения не найдены");
+                        displayedReport.totals().all()==0?getString(R.string.l10n_log_empty):"Подключения не найдены");
                 empty.setGravity(Gravity.CENTER);
                 empty.setMinimumHeight(dp(64));
                 return empty;
@@ -1530,7 +1540,7 @@ public final class MainActivity extends Activity {
             NetworkErrors.Detail detail=NetworkErrors.describe(entry.result());
             info+="\n\n"+detail.title()+"\n"+detail.hint()+"\nКод: "+detail.code();
         }
-        new AlertDialog.Builder(this).setTitle(entry.target()).setMessage(info).setPositiveButton("Закрыть",null).show();
+        new AlertDialog.Builder(this).setTitle(entry.target()).setMessage(info).setPositiveButton(getString(R.string.l10n_common_close),null).show();
     }
 
     private class ChartView extends View {
@@ -1615,11 +1625,11 @@ public final class MainActivity extends Activity {
 
     private String routeLabel(String mode) {
         return switch(mode) {
-            case Config.PROXY -> "Прокси";
+            case Config.PROXY -> getString(R.string.l10n_log_proxy);
             case "service" -> "Событие VPN";
             case Config.DIRECT -> "Напрямую";
-            case Config.BYPASS -> "Вне VPN";
-            case Config.BLOCK -> "Блок";
+            case Config.BYPASS -> getString(R.string.l10n_firewall_outside_vpn);
+            case Config.BLOCK -> getString(R.string.l10n_log_block);
             default -> "По умолчанию";
         };
     }
@@ -1704,7 +1714,7 @@ public final class MainActivity extends Activity {
         if(appScanFailed)fetchApps();
         firewallActive=RouteService.status.connected();
         firewallToggle=design.toggle("VPN и фильтрация",firewallActive,this::toggle);
-        header("Брандмауэр",firewallToggle);
+        header(getString(R.string.l10n_nav_firewall),firewallToggle);
         LinearLayout body=design.column();
         LinearLayout rulesHeader=design.column();
         LinearLayout banner=design.row(); design.pad(banner,16,16); design.surface(banner,PANEL,28);
@@ -1717,11 +1727,11 @@ public final class MainActivity extends Activity {
         add(text,firewallCount,-2,3); design.weight(banner,text);
         add(rulesHeader,banner,-2,0);
         renderFirewallStatus();
-        add(rulesHeader,heading("Глобальные правила"),-2,24);
+        add(rulesHeader,heading(getString(R.string.l10n_firewall_global_rules)),-2,24);
         LinearLayout global=panel(16);
-        preferenceSwitch(global,"Блокировать трекеры","DNS-фильтр известных доменов аналитики","trackers",false);
-        preferenceSwitch(global,"Блокировать рекламу","DNS-фильтр известных рекламных сетей","ads",false);
-        preferenceSwitch(global,"Только Wi-Fi для прокси","Мобильная сеть — напрямую, правила остаются активны","wifiOnly",false);
+        preferenceSwitch(global,getString(R.string.l10n_firewall_block_trackers),"DNS-фильтр известных доменов аналитики","trackers",false);
+        preferenceSwitch(global,getString(R.string.l10n_firewall_block_ads),"DNS-фильтр известных рекламных сетей","ads",false);
+        preferenceSwitch(global,getString(R.string.l10n_firewall_wifi_only),"Мобильная сеть — напрямую, правила остаются активны","wifiOnly",false);
         add(rulesHeader,global,-2,8);
         add(body,rulesHeader,-2,0);
         rulesHeader.setVisibility(firewallSearch.trim().isEmpty()?View.VISIBLE:View.GONE);
@@ -1729,7 +1739,7 @@ public final class MainActivity extends Activity {
         add(body,count,-2,24);
         Config.AppScope scope=config.appScope();
         boolean picking=choosingApps||scope.selectedOnly();
-        add(body,segment(new String[]{"Все приложения","Только выбранные"},picking?1:0,index->{
+        add(body,segment(new String[]{getString(R.string.l10n_firewall_all_apps),getString(R.string.l10n_firewall_selected_apps)},picking?1:0,index->{
             if(index==0) {
                 if(!picking)return;
                 choosingApps=false;
@@ -1764,7 +1774,7 @@ public final class MainActivity extends Activity {
                 }):null;
         if(apply!=null)add(body,apply,44,8);
         AppsAdapter adapter=new AppsAdapter(count,firewallSearch,picking,scope,apply);
-        EditText search=searchField("Поиск приложений",firewallSearch,value->{
+        EditText search=searchField(getString(R.string.l10n_firewall_search_apps),firewallSearch,value->{
             firewallSearch=value;
             rulesHeader.setVisibility(value.trim().isEmpty()?View.VISIBLE:View.GONE);
             adapter.filter(value);
@@ -2026,10 +2036,10 @@ public final class MainActivity extends Activity {
         Config.AppScope scope=config.appScope();
         boolean outside=scope.selectedOnly()&&!Config.BLOCK.equals(mode)&&!config.included().contains(app.pkg())
                 ||scope.exclusionsEnabled()&&Config.BYPASS.equals(mode);
-        settingRow(details,"Журнал",outside?"Трафик вне туннеля не виден":"Соединения этого приложения",
-                design.toggle("Журнал",!outside,null),null);
+        settingRow(details,getString(R.string.l10n_nav_log),outside?"Трафик вне туннеля не виден":"Соединения этого приложения",
+                design.toggle(getString(R.string.l10n_nav_log),!outside,null),null);
         add(body,details,-2,8);
-        add(body,design.pill("Сбросить правила",14,ROSE,PANEL,48,()->{if(writeRule(app,Config.PROXY))render();}),48,20);
+        add(body,design.pill(getString(R.string.l10n_firewall_reset_rules),14,ROSE,PANEL,48,()->{if(writeRule(app,Config.PROXY))render();}),48,20);
     }
     private void settingRow(LinearLayout parent,String title,String subtitle,View accessory,Runnable click) {
         LinearLayout row=design.row();
@@ -2066,17 +2076,17 @@ public final class MainActivity extends Activity {
         settingRow(parent,title,null,end,click);
     }
     private void settings() {
-        header("Настройки",null);
+        header(getString(R.string.l10n_nav_settings),null);
         LinearLayout body=scrollContent(0,20);
         LinearLayout controls=panel(16);
         RouteService active=RouteService.instance;
         boolean auto=getPreferences(MODE_PRIVATE).getBoolean("autoCheck",true);
-        settingToggle(controls,"Постоянный VPN","Always-on VPN · системные настройки",active!=null&&active.isAlwaysOn(),
+        settingToggle(controls,getString(R.string.l10n_settings_always_on_vpn),"Always-on VPN · системные настройки",active!=null&&active.isAlwaysOn(),
                 ()->openSettings(Settings.ACTION_VPN_SETTINGS));
-        settingToggle(controls,"Блок без VPN","Запретить трафик вне VPN",active!=null&&active.isLockdownEnabled(),
+        settingToggle(controls,getString(R.string.l10n_settings_block_without_vpn),"Запретить трафик вне VPN",active!=null&&active.isLockdownEnabled(),
                 ()->openSettings(Settings.ACTION_VPN_SETTINGS));
-        settingToggle(controls,"Экономия батареи","Фоновый режим без опроса прокси",true,null);
-        FigmaUi.Toggle autoToggle=design.toggle("Проверка при входе",auto,null);
+        settingToggle(controls,getString(R.string.l10n_settings_battery_saver),"Фоновый режим без опроса прокси",true,null);
+        FigmaUi.Toggle autoToggle=design.toggle(getString(R.string.l10n_settings_check_on_open),auto,null);
         autoToggle.setAction(()->{
             var prefs=getPreferences(MODE_PRIVATE);
             boolean next=!prefs.getBoolean("autoCheck",true);
@@ -2085,27 +2095,27 @@ public final class MainActivity extends Activity {
             if(next)checkAll();
         });
         design.separator(controls);
-        settingRow(controls,"Проверка при входе","Статус серверов при открытии",autoToggle,null);
+        settingRow(controls,getString(R.string.l10n_settings_check_on_open),"Статус серверов при открытии",autoToggle,null);
         boolean notifications=getSystemService(android.app.NotificationManager.class).areNotificationsEnabled();
-        settingToggle(controls,"Уведомление в шторке","Статус подключения",notifications,()-> {
+        settingToggle(controls,getString(R.string.l10n_settings_notifications),"Статус подключения",notifications,()-> {
             Intent intent=new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
                     .putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName());
             openActivity(intent,"Настройки уведомлений недоступны");
         });
-        settingToggle(controls,"DNS через прокси","Шифрованные запросы по маршруту приложения",!config.enabled("dnsDirect",false),()->openPage("dns"));
+        settingToggle(controls,getString(R.string.l10n_settings_dns_proxy),"Шифрованные запросы по маршруту приложения",!config.enabled("dnsDirect",false),()->openPage("dns"));
         add(body,controls,-2,0);
         LinearLayout pages=panel(16);
-        settingLink(pages,"Сторонний VPN","Android",()->openPage("vpn"));
-        settingLink(pages,"DNS-сервер",DnsOptions.selected(config).name(),()->openPage("dns"));
-        settingLink(pages,"Производительность","",()->openPage("performance"));
-        settingLink(pages,"Язык","Русский",()->openPage("language"));
+        settingLink(pages,getString(R.string.l10n_settings_third_party_vpn),"Android",()->openPage("vpn"));
+        settingLink(pages,getString(R.string.l10n_settings_dns_server),DnsOptions.selected(config).name(),()->openPage("dns"));
+        settingLink(pages,getString(R.string.l10n_performance_title),"",()->openPage("performance"));
+        settingLink(pages,getString(R.string.l10n_settings_language),AppLanguage.label(this),()->openPage("language"));
         add(body,pages,-2,16);
         LinearLayout privateDns=panel(16);
-        settingLink(privateDns,"Частный DNS","Android",()->openSettings("android.settings.PRIVATE_DNS_SETTINGS"));
+        settingLink(privateDns,getString(R.string.l10n_settings_private_dns),"Android",()->openSettings("android.settings.PRIVATE_DNS_SETTINGS"));
         add(body,privateDns,-2,16);
         LinearLayout usage=design.row(); design.pad(usage,16,16); design.surface(usage,PANEL,16);
         TextView down=design.terminal("—",18,TEXT),up=design.terminal("—",18,TEXT);
-        design.weight(usage,trafficStat("За неделю",R.drawable.fig_down,LIME,down)); gap(usage,12);
+        design.weight(usage,trafficStat(getString(R.string.l10n_traffic_week),R.drawable.fig_down,LIME,down)); gap(usage,12);
         design.weight(usage,trafficStat("Отдано",R.drawable.fig_up,SKY,up));
         add(body,usage,-2,16);
         data.execute(()->{
@@ -2113,22 +2123,22 @@ public final class MainActivity extends Activity {
                 History.Chart week=history.chart(1440,7);
                 ui.post(()->{down.setText(size(week.totalDown())); up.setText(size(week.totalUp()));});
             } catch(android.database.sqlite.SQLiteException e) {
-                ui.post(()->{down.setText("Недоступно"); up.setText("Недоступно");});
+                ui.post(()->{down.setText(getString(R.string.l10n_common_unavailable)); up.setText(getString(R.string.l10n_common_unavailable));});
             }
         });
         TextView version=t("ProxyRoute · версия " + BuildConfig.VERSION_NAME,12,FAINT,400); version.setGravity(Gravity.CENTER);
         add(body,version,-2,24);
     }
     private void performancePage() {
-        pageHeader("Производительность",false,null,this::closePage);
+        pageHeader(getString(R.string.l10n_performance_title),false,null,this::closePage);
         LinearLayout body = scrollContent(0,20);
         LinearLayout controls = panel(16);
-        performanceChoice(controls,"Сетевой режим","ipMode",
-                new String[]{"auto","ipv4","dual"},new String[]{"Автоматически","Только IPv4","IPv4 и IPv6"});
+        performanceChoice(controls,getString(R.string.l10n_performance_network),"ipMode",
+                new String[]{"auto","ipv4","dual"},new String[]{getString(R.string.l10n_performance_auto),getString(R.string.l10n_performance_ipv4),"IPv4 и IPv6"});
         performanceChoice(controls,"QUIC","quicMode",
-                new String[]{"auto","enabled","disabled"},new String[]{"Автоматически","Разрешать","Отключить"});
+                new String[]{"auto","enabled","disabled"},new String[]{getString(R.string.l10n_performance_auto),getString(R.string.l10n_performance_allow),getString(R.string.l10n_performance_disable)});
         boolean cache = config.enabled("dnsCache",true);
-        settingToggle(controls,"DNS-кэш","Сохранять DNS-ответы на время их действия",cache,() -> {
+        settingToggle(controls,getString(R.string.l10n_performance_dns_cache),"Сохранять DNS-ответы на время их действия",cache,() -> {
             config.setEnabled("dnsCache",!cache);
             reconfigure();
             render();
@@ -2149,7 +2159,7 @@ public final class MainActivity extends Activity {
                     config.setOption(key,values[which]);
                     reconfigure();
                     render();
-                }).setNegativeButton("Отмена",null).show());
+                }).setNegativeButton(getString(R.string.l10n_common_cancel),null).show());
     }
 
     private void showPerformance(String profileId) {
@@ -2175,14 +2185,14 @@ public final class MainActivity extends Activity {
                 + "\nСоединения TCP · " + values.get("tcp_ok") + " успешных, " + values.get("tcp_failed") + " с ошибкой"
                 + "\nАктивные TCP / UDP / DNS · " + values.get("active_tcp") + " / " + values.get("active_udp") + " / " + values.get("active_dns")
                 + "\nОтказы по лимиту потоков · " + values.get("flow_limit");
-        new AlertDialog.Builder(this).setTitle("Состояние прокси").setMessage(info)
-                .setPositiveButton("Закрыть",null).show();
+        new AlertDialog.Builder(this).setTitle(getString(R.string.l10n_diagnostics_status)).setMessage(info)
+                .setPositiveButton(getString(R.string.l10n_common_close),null).show();
     }
 
-    private static String capability(String state) {
+    private String capability(String state) {
         return switch (state == null ? "" : state) {
             case "SUPPORTED" -> "Поддерживается";
-            case "UNSUPPORTED" -> "Недоступно";
+            case "UNSUPPORTED" -> getString(R.string.l10n_common_unavailable);
             case "DEGRADED" -> "Нестабильно";
             case "TEMPORARILY_UNAVAILABLE" -> "Временно недоступно";
             default -> "Не проверено";
@@ -2196,7 +2206,7 @@ public final class MainActivity extends Activity {
         stat.addView(tag);add(stat,total,-2,4);return stat;
     }
     private void externalVpn() {
-        pageHeader("Сторонний VPN",false,null,this::closePage);
+        pageHeader(getString(R.string.l10n_settings_third_party_vpn),false,null,this::closePage);
         LinearLayout body=scrollContent(8,32),details=panel(16);
         settingRow(details,"Локальный прокси","Укажи HTTP или SOCKS5, который предоставляет другое приложение. Для локального входа используй 127.0.0.1 и порт из настроек этого приложения.",
                 null,null);
@@ -2221,14 +2231,28 @@ public final class MainActivity extends Activity {
         add(body,design.pill("Системные настройки VPN",14,LIME,PANEL,48,()->openSettings(Settings.ACTION_VPN_SETTINGS)),48,20);
     }
     private void languagePage() {
-        pageHeader("Язык",false,null,this::closePage);
-        LinearLayout body=scrollContent(8,32),details=panel(16);
-        settingRow(details,"Русский","Язык интерфейса ProxyRoute",
-                icon(R.drawable.fig_check,BG,LIME,24,16,100,null,null),null);
+        pageHeader(getString(R.string.l10n_settings_language),false,null,this::closePage);
+        LinearLayout body = scrollContent(8,32), details = panel(16);
+        String selected = AppLanguage.selected(this);
+        languageRow(details, "", getString(R.string.l10n_settings_system_language), selected);
+        for (AppLanguage.Option option : AppLanguage.OPTIONS) {
+            design.separator(details);
+            languageRow(details, option.tag(), option.name(), selected);
+        }
         add(body,details,-2,0);
     }
+
+    private void languageRow(LinearLayout parent, String tag, String label, String selected) {
+        View checked = tag.equalsIgnoreCase(selected)
+                ? icon(R.drawable.fig_check,BG,LIME,24,16,100,null,null) : null;
+        settingRow(parent,label,null,checked,() -> {
+            if (AppLanguage.select(this,tag) && Build.VERSION.SDK_INT < 33) recreate();
+        });
+        parent.getChildAt(parent.getChildCount()-1).setSelected(checked != null);
+    }
+
     private void dnsPage() {
-        pageHeader("DNS-сервер",false,null,this::closePage);
+        pageHeader(getString(R.string.l10n_settings_dns_server),false,null,this::closePage);
         LinearLayout body=scrollContent(8,32),details=panel(16);
         DnsOptions current=DnsOptions.selected(config);
         for(DnsOptions preset:DnsOptions.PRESETS) {
@@ -2238,12 +2262,12 @@ public final class MainActivity extends Activity {
                     ()->{config.setDns(preset); reconfigure(); render();});
         }
         design.separator(details);
-        settingRow(details,"Свой сервер","HTTPS-адрес DoH и IP для подключения",
+        settingRow(details,getString(R.string.l10n_settings_custom_dns),"HTTPS-адрес DoH и IP для подключения",
                 current.name().equals("Свой сервер")?icon(R.drawable.fig_check,BG,LIME,24,16,100,null,null):null,
                 ()->openPage("dnsCustom"));
         add(body,details,-2,0);
         LinearLayout routing=panel(16);
-        FigmaUi.Toggle toggle=design.toggle("DNS через прокси",!config.enabled("dnsDirect",false),null);
+        FigmaUi.Toggle toggle=design.toggle(getString(R.string.l10n_settings_dns_proxy),!config.enabled("dnsDirect",false),null);
         toggle.setAction(()->{
             boolean next=!config.enabled("dnsDirect",false);
             config.setEnabled("dnsDirect",next);
@@ -2255,7 +2279,7 @@ public final class MainActivity extends Activity {
     }
 
     private void customDns() {
-        pageHeader("Свой DNS-сервер",false,null,()->openPage("dns"));
+        pageHeader(getString(R.string.l10n_settings_custom_dns),false,null,()->openPage("dns"));
         LinearLayout body=scrollContent(10,32);
         DnsOptions current=DnsOptions.selected(config);
         boolean custom=current.name().equals("Свой сервер");
@@ -2265,7 +2289,7 @@ public final class MainActivity extends Activity {
         fieldGroup(body,"IP сервера",ip,56,16);
         TextView error=t("",13,ROSE,400);
         add(body,error,-2,8);
-        add(body,design.pill("Сохранить",14,BG,LIME,48,()->{
+        add(body,design.pill(getString(R.string.l10n_common_save),14,BG,LIME,48,()->{
             try {
                 config.setDns(DnsOptions.custom(url.getText().toString(),ip.getText().toString()));
                 hideKeyboard(url); reconfigure(); openPage("dns");
