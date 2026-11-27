@@ -13,6 +13,13 @@ final class NetworkErrors {
             case "app_scope": return new Detail("APP_SCOPE","Не выбраны приложения для VPN","Выбери установленные приложения в брандмауэре.");
             case "native_start": return new Detail("NATIVE_START","Сетевой модуль недоступен","Переустанови подписанную сборку поверх текущей версии.");
             case "foreground_start": return new Detail("FOREGROUND_START","Android не запустил VPN","Открой ProxyRoute и повтори подключение.");
+            case "ipv6_unavailable": return new Detail("IPV6_UNAVAILABLE","IPv6 недоступен","Проверь сетевой режим и поддержку IPv6 у прокси.");
+            case "udp_unsupported": return new Detail("UDP_UNSUPPORTED","UDP недоступен через этот прокси","Для UDP нужен SOCKS5 с рабочим релеем.");
+            case "udp_relay_unreachable": return new Detail("UDP_RELAY_UNREACHABLE","Релей SOCKS5 недоступен","Проверь доступ к UDP-адресу релея.");
+            case "udp_no_response": return new Detail("UDP_NO_RESPONSE","Нет ответа UDP","Проверь маршрутизацию UDP у провайдера и прокси.");
+            case "quic_unavailable": return new Detail("QUIC_UNAVAILABLE","QUIC недоступен через прокси","Приложение может перейти на TCP.");
+            case "socket_protection_failed": return new Detail("SOCKET_PROTECTION_FAILED","Не удалось привязать сокет к сети","VPN повторит подключение после восстановления сети.");
+            case "network_changed": return new Detail("NETWORK_CHANGED","Изменилась физическая сеть","");
         }
         if(value.equals("proxy_auth")) value="authentication";
         if(value.equals("vpn_permission")) value="permission";
@@ -30,6 +37,7 @@ final class NetworkErrors {
             return new Detail("UDP_UNSUPPORTED","UDP недоступен через этот прокси","Используй SOCKS5 с поддержкой UDP или прямой маршрут.");
         if(value.contains("refused") || value.contains("rejected") || value.contains("no route"))
             return new Detail("CONNECT","Соединение отклонено","Проверь порт, протокол и разрешённые направления на прокси.");
+        if(value.contains("socket_protection_failed")) return describe("socket_protection_failed");
         if(value.contains("разрешение") || value.contains("permission") || value.contains("protect"))
             return new Detail("VPN_PERMISSION","Не удалось открыть VPN","Проверь разрешение VPN и какой VPN выбран в Android.");
         if(value.contains("сеть") || value.contains("network"))
@@ -38,7 +46,7 @@ final class NetworkErrors {
     }
     static boolean failed(String result) {
         return switch(result==null?"":result) {
-            case "active","closed","VPN stopped","process stopped","blocked by application rule","blocked by DNS filter" -> false;
+            case "active","closed","VPN stopped","process stopped","blocked by application rule","blocked by DNS filter","NETWORK_CHANGED" -> false;
             default -> true;
         };
     }

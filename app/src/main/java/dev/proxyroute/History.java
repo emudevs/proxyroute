@@ -31,6 +31,7 @@ final class History extends SQLiteOpenHelper {
 
     record Connection(long time, String app, String protocol, String target, String route,
                       String result, long up, long down) {}
+    record Metrics(long tcpMillis,long handshakeMillis,long firstByteMillis,long dnsMillis,String stage) {}
     record Totals(long all, long blocked, long errors) {}
     record Chart(long[] up, long[] down, long totalUp, long totalDown) {}
     private interface Event { void apply(SQLiteDatabase db); }
@@ -59,7 +60,9 @@ final class History extends SQLiteOpenHelper {
 
     @Override public void onCreate(SQLiteDatabase db) {
         db.execSQL("CREATE TABLE connections(row INTEGER PRIMARY KEY,key TEXT UNIQUE,ts INTEGER,app TEXT,"
-                + "protocol TEXT,target TEXT,route TEXT,result TEXT,up INTEGER DEFAULT 0,down INTEGER DEFAULT 0)");
+                + "protocol TEXT,target TEXT,route TEXT,result TEXT,up INTEGER DEFAULT 0,down INTEGER DEFAULT 0,"
+                + "ended INTEGER,profile TEXT,network TEXT,family INTEGER,tcpMs INTEGER,handshakeMs INTEGER,"
+                + "firstByteMs INTEGER,dnsMs INTEGER,stage TEXT)");
         db.execSQL("CREATE TABLE traffic(minute INTEGER PRIMARY KEY,up INTEGER,down INTEGER)");
     }
 
@@ -67,7 +70,33 @@ final class History extends SQLiteOpenHelper {
         throw new IllegalStateException("Unknown database version " + from);
     }
 
+    @Override public void onOpen(SQLiteDatabase db) {
+        super.onOpen(db);
+        if (db.isReadOnly()) return;
+        // The new fields are additive. Older APKs can continue to use the same journal.
+        var columns = new java.util.HashSet<String>();
+        try (Cursor cursor = db.rawQuery("PRAGMA table_info(connections)", null)) {
+            while (cursor.moveToNext()) columns.add(cursor.getString(1));
+        }
+        if (columns.contains("stage")) return;
+        db.beginTransaction();
+        try {
+            for (String column : new String[]{"ended INTEGER","profile TEXT","network TEXT","family INTEGER",
+                    "tcpMs INTEGER","handshakeMs INTEGER","firstByteMs INTEGER","dnsMs INTEGER","stage TEXT"}) {
+                if (!columns.contains(column.substring(0,column.indexOf(' '))))
+                    db.execSQL("ALTER TABLE connections ADD COLUMN " + column);
+            }
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
     void open(String id, String app, String protocol, String target, String route) {
+        open(id,app,protocol,target,route,"","");
+    }
+
+    void open(String id, String app, String protocol, String target, String route, String profile, String network) {
         long now = System.currentTimeMillis();
         push(db -> {
             ContentValues row = new ContentValues();
@@ -77,6 +106,10 @@ final class History extends SQLiteOpenHelper {
             row.put("protocol", protocol);
             row.put("target", target);
             row.put("route", route);
+            row.put("profile", profile);
+            row.put("network", network);
+            if ((protocol.equals("TCP") || protocol.equals("UDP") || protocol.startsWith("DNS/")) && target.indexOf(':') >= 0)
+                row.put("family", target.startsWith("[") ? 6 : 4);
             row.put("result", "active");
             db.insertOrThrow("connections", null, row);
         });
@@ -88,7 +121,7 @@ final class History extends SQLiteOpenHelper {
         close(key,result,0,0);
     }
 
-    void export(java.io.OutputStream stream) throws java.io.IOException {
+    void export(java.io.OutputStream stream, boolean anonymous, String snapshot) throws java.io.IOException {
         try {
             if (!writer.submit(this::flush).get(5,TimeUnit.SECONDS)) throw new Unavailable(null);
         } catch(java.util.concurrent.ExecutionException | java.util.concurrent.TimeoutException e) {
@@ -100,22 +133,52 @@ final class History extends SQLiteOpenHelper {
         java.io.Writer output=new java.io.BufferedWriter(new java.io.OutputStreamWriter(stream,java.nio.charset.StandardCharsets.UTF_8));
         android.util.JsonWriter json=new android.util.JsonWriter(output);
         json.beginObject();
-        json.name("format").value("proxyroute-log-v1");
-        json.name("exportedAt").value(java.time.Instant.now().toString());
+        json.name("format").value(anonymous ? "proxyroute-diagnostics-v1" : "proxyroute-log-v1");
+        if (!snapshot.isEmpty()) {
+            json.name("performance").beginObject();
+            for (String item : snapshot.split(";")) {
+                int split = item.indexOf('=');
+                if (split > 0) json.name(item.substring(0,split)).value(item.substring(split+1));
+            }
+            json.endObject();
+        }
+        var sessions = new java.util.HashMap<String,Integer>();
+        var profiles = new java.util.HashMap<String,Integer>();
+        if (!anonymous) json.name("exportedAt").value(java.time.Instant.now().toString());
         json.name("connections").beginArray();
         try(Cursor c=getReadableDatabase().rawQuery(
-                "SELECT ts,app,protocol,target,route,result,up,down FROM connections ORDER BY row DESC",null)) {
+                "SELECT ts,app,protocol,target,route,result,up,down,key,ended,profile,network,family,"
+                + "tcpMs,handshakeMs,firstByteMs,dnsMs,stage FROM connections ORDER BY row DESC",null)) {
             while(c.moveToNext()) {
                 String result=c.getString(5);
                 json.beginObject();
-                json.name("time").value(java.time.Instant.ofEpochMilli(c.getLong(0)).toString());
-                json.name("app").value(c.getString(1));
+                if (!anonymous) {
+                    json.name("time").value(java.time.Instant.ofEpochMilli(c.getLong(0)).toString());
+                    json.name("app").value(c.getString(1));
+                    json.name("target").value(c.getString(3));
+                }
                 json.name("protocol").value(c.getString(2));
-                json.name("target").value(c.getString(3));
                 json.name("route").value(c.getString(4));
                 json.name("result").value(NetworkErrors.failed(result)?NetworkErrors.describe(result).code():result);
                 json.name("sent").value(c.getLong(6));
                 json.name("received").value(c.getLong(7));
+                String session = c.getString(8).split("/",2)[0];
+                if (!session.equals("service")) json.name("session").value(anonymous
+                        ? Integer.toString(sessions.computeIfAbsent(session,key -> sessions.size()+1)) : session);
+                if (!c.isNull(9)) {
+                    if (!anonymous) json.name("endedAt").value(java.time.Instant.ofEpochMilli(c.getLong(9)).toString());
+                    json.name("durationMs").value(Math.max(0,c.getLong(9)-c.getLong(0)));
+                }
+                String profile = c.getString(10);
+                if (profile != null && !profile.isEmpty()) json.name("profile").value(anonymous
+                        ? Integer.toString(profiles.computeIfAbsent(profile,key -> profiles.size()+1)) : profile);
+                if (!c.isNull(11) && !c.getString(11).isEmpty()) json.name("network").value(c.getString(11));
+                if (!c.isNull(12)) json.name("ipVersion").value(c.getInt(12));
+                String[] timings = {"tcpMs","proxyHandshakeMs","firstByteMs","dnsMs"};
+                for (int i=0;i<timings.length;i++)
+                    if (!c.isNull(13+i)) json.name(timings[i]).value(c.getLong(13+i));
+                String stage = c.getString(17);
+                if (stage != null && !stage.isEmpty()) json.name("stage").value(stage);
                 json.endObject();
             }
         } catch (android.database.sqlite.SQLiteException e) { throw new Unavailable(e); }
@@ -125,11 +188,24 @@ final class History extends SQLiteOpenHelper {
     }
 
     void close(String id, String result, long up, long down) {
+        close(id,result,up,down,null);
+    }
+
+    void close(String id, String result, long up, long down, Metrics metrics) {
+        long ended = System.currentTimeMillis();
         push(db -> {
             ContentValues values = new ContentValues();
             values.put("result", result);
             values.put("up", up);
             values.put("down", down);
+            values.put("ended", ended);
+            if (metrics != null) {
+                if (metrics.tcpMillis() > 0) values.put("tcpMs", metrics.tcpMillis());
+                if (metrics.handshakeMillis() > 0) values.put("handshakeMs", metrics.handshakeMillis());
+                if (metrics.firstByteMillis() > 0) values.put("firstByteMs", metrics.firstByteMillis());
+                if (metrics.dnsMillis() > 0) values.put("dnsMs", metrics.dnsMillis());
+                values.put("stage", metrics.stage());
+            }
             db.update("connections", values, "key=?", new String[]{id});
         });
     }
@@ -218,7 +294,7 @@ final class History extends SQLiteOpenHelper {
         return result;
     }
 
-    private static final String ERROR = "result NOT IN ('active','closed','process stopped','VPN stopped','blocked by application rule','blocked by DNS filter')";
+    private static final String ERROR = "result NOT IN ('active','closed','process stopped','VPN stopped','blocked by application rule','blocked by DNS filter','NETWORK_CHANGED')";
 
     Totals totals(long since) {
         try (Cursor cursor = getReadableDatabase().rawQuery(

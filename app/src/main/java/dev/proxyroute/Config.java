@@ -61,6 +61,7 @@ final class Config {
     boolean enabled(String name,boolean fallback) { return preferences.getBoolean(name,fallback); }
     void setEnabled(String name,boolean value) { preferences.edit().putBoolean(name,value).apply(); }
     String option(String name,String fallback) { return preferences.getString(name,fallback); }
+    void setOption(String name,String value) { preferences.edit().putString(name,value).apply(); }
     void setDns(DnsOptions options) {
         preferences.edit().putString("dnsUrl",options.url()).putString("dnsIp",options.bootstrap()).apply();
     }
@@ -163,18 +164,31 @@ final class Config {
     }
 
     static List<String> addresses(Context context, String host) throws Exception {
-        if (InetAddresses.isNumericAddress(host)) return Collections.singletonList(host);
         ConnectivityManager manager = context.getSystemService(ConnectivityManager.class);
-        Network selected = manager.getActiveNetwork();
-        if (!physical(manager, selected)) {
-            selected = null;
-            for (Network candidate : manager.getAllNetworks()) {
-                if (!physical(manager, candidate)) continue;
-                if (selected == null || manager.getNetworkCapabilities(candidate).hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) {
-                    selected = candidate;
-                }
+        return addresses(physicalNetwork(manager), host);
+    }
+
+    static Network physicalNetwork(ConnectivityManager manager) {
+        Network active = manager.getActiveNetwork();
+        if (physical(manager, active)) return active;
+        Network selected = null;
+        int best = -1;
+        for (Network candidate : manager.getAllNetworks()) {
+            NetworkCapabilities caps = manager.getNetworkCapabilities(candidate);
+            if (!physical(caps)) continue;
+            int score = caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ? 2 : 0;
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                    caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) score++;
+            if (score > best) {
+                best = score;
+                selected = candidate;
             }
         }
+        return selected;
+    }
+
+    static List<String> addresses(Network selected, String host) throws Exception {
+        if (InetAddresses.isNumericAddress(host)) return Collections.singletonList(host);
         if (selected == null) throw new IllegalStateException("Сеть недоступна");
         List<String> result = new ArrayList<>();
         for (InetAddress address : selected.getAllByName(host)) result.add(address.getHostAddress());
@@ -184,6 +198,10 @@ final class Config {
 
     private static boolean physical(ConnectivityManager manager, Network network) {
         NetworkCapabilities caps = network == null ? null : manager.getNetworkCapabilities(network);
+        return physical(caps);
+    }
+
+    private static boolean physical(NetworkCapabilities caps) {
         return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
                 && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN);
     }

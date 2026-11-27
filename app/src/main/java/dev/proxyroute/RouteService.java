@@ -11,6 +11,7 @@ import android.net.ConnectivityManager;
 import android.net.InetAddresses;
 import android.net.Network;
 import android.net.NetworkCapabilities;
+import android.net.NetworkRequest;
 import android.net.VpnService;
 import android.os.Build;
 import android.os.Handler;
@@ -20,6 +21,7 @@ import android.system.OsConstants;
 
 import dev.proxyroute.nativecore.tunnel.Engine;
 import dev.proxyroute.nativecore.tunnel.Hooks;
+import dev.proxyroute.nativecore.tunnel.PerformanceHooks;
 import dev.proxyroute.nativecore.tunnel.Tunnel;
 
 import java.net.InetSocketAddress;
@@ -62,8 +64,20 @@ public final class RouteService extends VpnService {
     private History history;
     private ConnectivityManager networks;
     private Network tunnelNetwork;
+    private boolean tunnelValidated;
+    private ScheduledFuture<?> networkRefresh;
+    private volatile ActiveDiagnostics diagnostics;
+
+    private record ActiveDiagnostics(String profileId, Engine engine) {}
+
+    String diagnostics(String profileId) {
+        ActiveDiagnostics active = diagnostics;
+        if (active == null || (profileId != null && !profileId.equals(active.profileId()))) return "";
+        return active.engine().diagnostics();
+    }
     private boolean wifiFallback;
     private boolean observingNetwork;
+    private boolean observingPhysical;
     private String noticeSpeed = "";
     private final Runnable resetNoticeSpeed = () -> showRate(0, 0);
     private final ConnectivityManager.NetworkCallback networkChanges = new ConnectivityManager.NetworkCallback() {
@@ -72,22 +86,53 @@ public final class RouteService extends VpnService {
         @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) { refreshNetwork(); }
     };
 
+    private final ConnectivityManager.NetworkCallback physicalChanges = new ConnectivityManager.NetworkCallback() {
+        @Override public void onAvailable(Network network) { refreshNetwork(); }
+        @Override public void onLost(Network network) { refreshNetwork(); }
+        @Override public void onCapabilitiesChanged(Network network,NetworkCapabilities capabilities) { refreshNetwork(); }
+    };
+
     private void refreshNetwork() {
-        if(!wanted || !config.enabled("wifiOnly",false) || worker.isShutdown()) return;
+        if (!wanted || worker.isShutdown()) return;
         try {
-            worker.execute(()->{
-                try {
-                    Network network=networks.getActiveNetwork();
-                    boolean fallback=config.read().active()!=null && !isWifi(network);
-                    if(engine!=null && (!java.util.Objects.equals(network,tunnelNetwork) || wifiFallback!=fallback)) {
-                        if(pending!=null)pending.cancel(false);
-                        establishTunnel();
-                    }
-                } catch(Config.ReadFailure | SecurityException e) {
-                    reportFailure(e instanceof Config.ReadFailure ? "config_read" : "vpn_permission",false);
-                }
+            worker.execute(() -> {
+                if (networkRefresh != null) networkRefresh.cancel(false);
+                networkRefresh = worker.schedule(this::recoverNetwork, 350, TimeUnit.MILLISECONDS);
             });
-        } catch(java.util.concurrent.RejectedExecutionException ignored) { }
+        } catch (java.util.concurrent.RejectedExecutionException ignored) { }
+    }
+
+    private void recoverNetwork() {
+        if (!wanted) return;
+        try {
+            Network network = Config.physicalNetwork(networks);
+            boolean fallback = config.enabled("wifiOnly", false) && network != null && !isWifi(network);
+            boolean validationRestored = validated(network) && !tunnelValidated;
+            boolean changed = !java.util.Objects.equals(network, tunnelNetwork);
+            if (changed || validationRestored || wifiFallback != fallback || (engine == null && network != null)) {
+                if (pending != null) pending.cancel(false);
+                if (changed || validationRestored) history.serviceEvent("Изменилась физическая сеть", "NETWORK_CHANGED");
+                establishTunnel();
+            } else {
+                tunnelValidated = validated(network);
+            }
+        } catch (Config.ReadFailure | SecurityException e) {
+            reportFailure(e instanceof Config.ReadFailure ? "config_read" : "vpn_permission", false);
+        }
+    }
+
+    private boolean validated(Network network) {
+        NetworkCapabilities caps = network == null ? null : networks.getNetworkCapabilities(network);
+        return caps != null && caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED);
+    }
+
+    private String networkType(Network network) {
+        NetworkCapabilities caps = network == null ? null : networks.getNetworkCapabilities(network);
+        if (caps == null) return "none";
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) return "wifi";
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR)) return "cellular";
+        if (caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) return "ethernet";
+        return "other";
     }
 
     private boolean isWifi(Network network) {
@@ -104,6 +149,12 @@ public final class RouteService extends VpnService {
         instance = this;
         try { networks.registerDefaultNetworkCallback(networkChanges); observingNetwork=true; }
         catch(RuntimeException e) { android.util.Log.w("ProxyRoute","Network listener unavailable",e); }
+        try {
+            networks.registerNetworkCallback(new NetworkRequest.Builder()
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_VPN).build(), physicalChanges);
+            observingPhysical = true;
+        } catch (RuntimeException e) { android.util.Log.w("ProxyRoute", "Physical network listener unavailable"); }
         NotificationChannel channel = new NotificationChannel(CHANNEL, "VPN", NotificationManager.IMPORTANCE_LOW);
         channel.setShowBadge(false);
         getSystemService(NotificationManager.class).createNotificationChannel(channel);
@@ -161,28 +212,23 @@ public final class RouteService extends VpnService {
             Config.Settings settings = config.read();
             Config.Profile profile = settings.active();
             boolean wifiOnly=config.enabled("wifiOnly",false);
-            Network physical=wifiOnly?networks.getActiveNetwork():null;
-            boolean fallback=wifiOnly && !isWifi(physical) && profile!=null;
+            Network physical = Config.physicalNetwork(networks);
+            boolean fallback = wifiOnly && physical != null && !isWifi(physical) && profile != null;
             boolean firewall = Config.FIREWALL.equals(settings.selected());
             if (!firewall && profile == null) {reportFailure("profile_missing",false); return;}
+            if (physical == null && engine != null) {
+                // Retain the capture routes while the old bound sockets are unavailable.
+                tunnelNetwork = null;
+                tunnelValidated = false;
+                setUnderlyingNetworks(new Network[0]);
+                update(new Status(true, false, "VPN · ожидание сети"));
+                return;
+            }
             Config.Credentials auth = fallback ? new Config.Credentials("","") : Config.credentials(profile);
             String ip = "";
             if (profile != null && !fallback) {
-                // Choose the first responsive address when a name has multiple
-                // records. A single address can still start with an offline proxy.
-                var addresses = Config.addresses(this, profile.host());
-                ip = addresses.get(0);
-                if (addresses.size() > 1) {
-                    for (String candidate : addresses) {
-                        try {
-                            Tunnel.check(new ProbeHooks(){ @Override public boolean protect(long fd) { return protectSocket(fd,physical); } },profile.protocol(),profile.host(),candidate,
-                                    profile.port(),auth.user(),auth.password());
-                            ip = candidate;
-                            break;
-                        } catch (Exception ignored) { }
-                        if (!wanted) return;
-                    }
-                }
+                if (physical != null || InetAddresses.isNumericAddress(profile.host()))
+                    ip = String.join(",", Config.addresses(physical, profile.host()));
             }
             if (!wanted) return;
 
@@ -213,27 +259,32 @@ public final class RouteService extends VpnService {
                     catch (PackageManager.NameNotFoundException ignored) { }
                 }
             }
-            if(physical!=null)builder.setUnderlyingNetworks(new Network[]{physical});
+            builder.setUnderlyingNetworks(physical == null ? new Network[0] : new Network[]{physical});
             next = builder.establish();
             if (next == null) {reportFailure("vpn_permission",false); return;}
             Session nextSession = engine == null ? new Session() : session;
             boolean direct=firewall||fallback;
             DnsOptions dns=DnsOptions.selected(config);
-            started=Tunnel.startConfigured(next.getFd(),
-                    new FlowHooks(policy,UUID.randomUUID().toString(),nextSession,physical),
+            String profileId = profile == null ? "" : profile.id();
+            started=Tunnel.startPerformance(next.getFd(),
+                    new FlowHooks(policy,UUID.randomUUID().toString(),nextSession,physical,profileId),
                     direct?"direct":profile.protocol(),direct?"":profile.host(),ip,
                     direct?0:profile.port(),auth.user(),auth.password(),direct,dns.url(),dns.bootstrap(),
-                    config.enabled("ads",false),config.enabled("trackers",false),config.enabled("dnsDirect",false));
+                    config.enabled("ads",false),config.enabled("trackers",false),config.enabled("dnsDirect",false),
+                    config.option("ipMode","auto"),config.option("quicMode","auto"),config.enabled("dnsCache",true));
             closeTunnel();
             tun = next;
             next = null;
             engine = started;
+            diagnostics = direct ? null : new ActiveDiagnostics(profileId, engine);
             started = null;
             session = nextSession;
             failures = 0;
             tunnelNetwork=physical;
+            tunnelValidated=validated(physical);
             wifiFallback=fallback;
             String message=firewall?"Брандмауэр активен":fallback?"Прямой доступ · прокси только по Wi-Fi":"VPN активен · "+profile.label();
+            if (physical == null) message = "VPN · ожидание сети";
             update(new Status(true,false,message));
             history.serviceEvent(message,"closed");
         } catch (Exception | LinkageError e) {
@@ -269,6 +320,7 @@ public final class RouteService extends VpnService {
     }
 
     private void closeTunnel() {
+        diagnostics = null;
         stopEngine(engine);
         engine = null;
         if (tun != null) {
@@ -292,9 +344,16 @@ public final class RouteService extends VpnService {
                 android.util.Log.w("ProxyRoute","Could not unregister network listener");
             }
         }
+        if (observingPhysical) {
+            try { networks.unregisterNetworkCallback(physicalChanges); }
+            catch (IllegalArgumentException | SecurityException e) {
+                android.util.Log.w("ProxyRoute", "Could not unregister physical network listener");
+            }
+        }
         if (instance == this) instance = null;
         worker.execute(() -> {
             if (pending != null) pending.cancel(false);
+            if (networkRefresh != null) networkRefresh.cancel(false);
             closeTunnel();
         });
         worker.shutdown();
@@ -355,7 +414,7 @@ public final class RouteService extends VpnService {
 
     private boolean protectSocket(long fd,Network network) {
         if(!protect((int)fd))return false;
-        if(network==null)return true;
+        if(network==null)return false;
         try(ParcelFileDescriptor socket=ParcelFileDescriptor.fromFd((int)fd)) {
             network.bindSocket(socket.getFileDescriptor());
             return true;
@@ -424,18 +483,21 @@ public final class RouteService extends VpnService {
         @Override public void traffic(long sent, long received) { }
     }
 
-    private final class FlowHooks extends ProbeHooks {
+    private final class FlowHooks extends ProbeHooks implements PerformanceHooks {
         private final Policy policy;
         private final String sessionId;
         private final Session counters;
         private final Network network;
+        private final String profileId, networkType;
         private final Map<Integer,String> labels = new java.util.concurrent.ConcurrentHashMap<>();
 
-        FlowHooks(Policy policy, String sessionId, Session counters,Network network) {
+        FlowHooks(Policy policy, String sessionId, Session counters,Network network,String profileId) {
             this.policy = policy;
             this.sessionId = sessionId;
             this.counters = counters;
             this.network=network;
+            this.profileId=profileId;
+            this.networkType=networkType(network);
         }
 
         @Override public boolean protect(long fd) { return protectSocket(fd,network); }
@@ -457,7 +519,7 @@ public final class RouteService extends VpnService {
 
         @Override public void opened(long id, long uid, String protocol, String target, String route) {
             String label = uid < 0 ? "Неопределённое приложение" : labels.computeIfAbsent((int) uid, this::label);
-            history.open(sessionId + "/" + id, label, protocol, target, route);
+            history.open(sessionId + "/" + id, label, protocol, target, route, profileId, networkType);
         }
 
         private String label(int uid) {
@@ -470,6 +532,11 @@ public final class RouteService extends VpnService {
             } catch (PackageManager.NameNotFoundException ignored) {
                 return packages[0];
             }
+        }
+
+        @Override public void finished(long id, String result, long sent, long received, long tcpMillis, long handshakeMillis, long firstByteMillis, long dnsMillis, String stage) {
+            history.close(sessionId + "/" + id, result, sent, received,
+                    new History.Metrics(tcpMillis,handshakeMillis,firstByteMillis,dnsMillis,stage));
         }
 
         @Override public void closed(long id, String result, long sent, long received) {

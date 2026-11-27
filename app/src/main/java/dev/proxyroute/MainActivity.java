@@ -69,7 +69,7 @@ import java.util.concurrent.Executors;
 import static dev.proxyroute.FigmaUi.*;
 
 public final class MainActivity extends Activity {
-    private static final int VPN_REQUEST=201, EXPORT_REQUEST=203, QR_IMAGE_REQUEST=204;
+    private static final int VPN_REQUEST=201, EXPORT_REQUEST=203, QR_IMAGE_REQUEST=204, DIAGNOSTICS_REQUEST=205;
     private static final String[] TABS={"Серверы","Журнал","Брандмауэр","Настройки"};
     private static final int[] TAB_ICONS={R.drawable.fig_servers,R.drawable.fig_log,R.drawable.fig_firewall,R.drawable.fig_settings};
     private static final String[] PROTOCOLS={"http","https","socks5"};
@@ -264,6 +264,7 @@ public final class MainActivity extends Activity {
                 case "app" -> appRule();
                 case "vpn" -> externalVpn();
                 case "dns" -> dnsPage();
+                case "performance" -> performancePage();
                 case "dnsCustom" -> customDns();
                 case "language" -> languagePage();
                 default -> throw new IllegalStateException(section);
@@ -344,12 +345,13 @@ public final class MainActivity extends Activity {
             if(result == RESULT_OK) connect();
             else showMessage("Подключение отменено. Разреши VPN, чтобы включить туннель.");
         }
-        if (request == EXPORT_REQUEST && result == RESULT_OK && payload!=null && payload.getData()!=null) {
+        if ((request == EXPORT_REQUEST || request == DIAGNOSTICS_REQUEST) && result == RESULT_OK && payload!=null && payload.getData()!=null) {
             var uri=payload.getData();
             appLoader.execute(()->{
                 try(var out=getContentResolver().openOutputStream(uri,"wt")) {
                     if(out==null)throw new java.io.IOException();
-                    history.export(out);
+                    RouteService service = RouteService.instance;
+                    history.export(out,request == DIAGNOSTICS_REQUEST,service == null ? "" : service.diagnostics(null));
                     ui.post(()->Toast.makeText(this,"Журнал выгружен",Toast.LENGTH_SHORT).show());
                 } catch(History.Unavailable e) {
                     ui.post(()->showMessage("Журнал недоступен. Повтори экспорт позже."));
@@ -874,6 +876,9 @@ public final class MainActivity extends Activity {
         qr.setContentDescription("QR-код подключения");
         actions.addView(qr);
         pageHeader(previous==null?"Новый сервер":"Настройки сервера",true,actions,this::closePage);
+        if (previous != null) {
+            add(page,design.pill("Состояние прокси",14,LIME,PANEL,40,() -> showPerformance(previous.id())),40,8);
+        }
         LinearLayout body=scrollContent(8,24);
         int[] protocol={previous==null?2:java.util.Arrays.asList(PROTOCOLS).indexOf(previous.protocol())};
         String[] ports={"8080","443","1080"};
@@ -1262,14 +1267,23 @@ public final class MainActivity extends Activity {
         }
     }
 
+    private void exportJournal(boolean anonymous) {
+        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json");
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        String prefix = anonymous ? "ProxyRoute-diagnostics-" : "ProxyRoute-";
+        intent.putExtra(Intent.EXTRA_TITLE,prefix+java.time.LocalDate.now()+".json");
+        try { startActivityForResult(intent,anonymous ? DIAGNOSTICS_REQUEST : EXPORT_REQUEST); }
+        catch (android.content.ActivityNotFoundException | SecurityException e) {
+            showMessage("Не удалось открыть выбор папки для экспорта");
+        }
+    }
+
     private void journal() {
         LinearLayout actions=design.row();
         actions.addView(icon(R.drawable.fig_down,LIME,TILE,40,20,100,"Выгрузить журнал",()->{
-            Intent intent=new Intent(Intent.ACTION_CREATE_DOCUMENT).setType("application/json");
-            intent.addCategory(Intent.CATEGORY_OPENABLE);
-            intent.putExtra(Intent.EXTRA_TITLE,"ProxyRoute-"+java.time.LocalDate.now()+".json");
-            try { startActivityForResult(intent,EXPORT_REQUEST); }
-            catch(android.content.ActivityNotFoundException | SecurityException e) { showMessage("Не удалось открыть выбор папки для экспорта"); }
+            new AlertDialog.Builder(this).setTitle("Выгрузить журнал")
+                    .setItems(new String[]{"Обезличенная диагностика","Полный журнал"},
+                            (dialog, selected) -> exportJournal(selected == 0)).show();
         }));
         gap(actions,8);
         actions.addView(icon(R.drawable.fig_trash,LIGHT,TILE,40,20,100,"Очистить журнал",this::confirmClear));
@@ -2083,6 +2097,7 @@ public final class MainActivity extends Activity {
         LinearLayout pages=panel(16);
         settingLink(pages,"Сторонний VPN","Android",()->openPage("vpn"));
         settingLink(pages,"DNS-сервер",DnsOptions.selected(config).name(),()->openPage("dns"));
+        settingLink(pages,"Производительность","",()->openPage("performance"));
         settingLink(pages,"Язык","Русский",()->openPage("language"));
         add(body,pages,-2,16);
         LinearLayout privateDns=panel(16);
@@ -2104,6 +2119,76 @@ public final class MainActivity extends Activity {
         TextView version=t("ProxyRoute · версия " + BuildConfig.VERSION_NAME,12,FAINT,400); version.setGravity(Gravity.CENTER);
         add(body,version,-2,24);
     }
+    private void performancePage() {
+        pageHeader("Производительность",false,null,this::closePage);
+        LinearLayout body = scrollContent(0,20);
+        LinearLayout controls = panel(16);
+        performanceChoice(controls,"Сетевой режим","ipMode",
+                new String[]{"auto","ipv4","dual"},new String[]{"Автоматически","Только IPv4","IPv4 и IPv6"});
+        performanceChoice(controls,"QUIC","quicMode",
+                new String[]{"auto","enabled","disabled"},new String[]{"Автоматически","Разрешать","Отключить"});
+        boolean cache = config.enabled("dnsCache",true);
+        settingToggle(controls,"DNS-кэш","Сохранять DNS-ответы на время их действия",cache,() -> {
+            config.setEnabled("dnsCache",!cache);
+            reconfigure();
+            render();
+        });
+        add(body,controls,-2,0);
+        LinearLayout tools = panel(16);
+        settingLink(tools,"Состояние активного прокси","",() -> showPerformance(null));
+        settingLink(tools,"Выгрузить обезличенную диагностику","",() -> exportJournal(true));
+        add(body,tools,-2,16);
+    }
+
+    private void performanceChoice(LinearLayout parent,String title,String key,String[] values,String[] names) {
+        int selected = Math.max(0,Arrays.asList(values).indexOf(config.option(key,"auto")));
+        settingLink(parent,title,names[selected],() -> new AlertDialog.Builder(this).setTitle(title)
+                .setSingleChoiceItems(names,selected,(dialog,which) -> {
+                    dialog.dismiss();
+                    if (which == selected) return;
+                    config.setOption(key,values[which]);
+                    reconfigure();
+                    render();
+                }).setNegativeButton("Отмена",null).show());
+    }
+
+    private void showPerformance(String profileId) {
+        RouteService service = RouteService.instance;
+        String snapshot = service == null ? "" : service.diagnostics(profileId);
+        if (snapshot.isEmpty()) {
+            showMessage("Подключи этот прокси для диагностики");
+            return;
+        }
+        var values = new java.util.HashMap<String,String>();
+        for (String item : snapshot.split(";")) {
+            int split = item.indexOf('=');
+            if (split > 0) values.put(item.substring(0,split),item.substring(split+1));
+        }
+        String info = "IPv4 / TCP · " + capability(values.get("ipv4_tcp"))
+                + "\nIPv6 / TCP · " + capability(values.get("ipv6_tcp"))
+                + "\nIPv4 / UDP · " + capability(values.get("ipv4_udp"))
+                + "\nIPv6 / UDP · " + capability(values.get("ipv6_udp"))
+                + "\nSOCKS5 UDP Associate · " + capability(values.get("socks5_udp"))
+                + "\nUDP/443 (IPv4 / IPv6) · " + capability(values.get("udp443_ipv4")) + " / " + capability(values.get("udp443_ipv6"))
+                + "\nDNS через прокси · " + capability(values.get("doh"))
+                + "\nПоследнее TCP / прокси-handshake · " + values.get("tcp_ms") + " / " + values.get("handshake_ms") + " мс"
+                + "\nСоединения TCP · " + values.get("tcp_ok") + " успешных, " + values.get("tcp_failed") + " с ошибкой"
+                + "\nАктивные TCP / UDP / DNS · " + values.get("active_tcp") + " / " + values.get("active_udp") + " / " + values.get("active_dns")
+                + "\nОтказы по лимиту потоков · " + values.get("flow_limit");
+        new AlertDialog.Builder(this).setTitle("Состояние прокси").setMessage(info)
+                .setPositiveButton("Закрыть",null).show();
+    }
+
+    private static String capability(String state) {
+        return switch (state == null ? "" : state) {
+            case "SUPPORTED" -> "Поддерживается";
+            case "UNSUPPORTED" -> "Недоступно";
+            case "DEGRADED" -> "Нестабильно";
+            case "TEMPORARILY_UNAVAILABLE" -> "Временно недоступно";
+            default -> "Не проверено";
+        };
+    }
+
     private LinearLayout trafficStat(String title,int glyph,int tint,TextView total) {
         LinearLayout stat=design.column(),tag=design.row();
         tag.addView(design.icon(glyph,tint),new LinearLayout.LayoutParams(dp(14),dp(14)));
