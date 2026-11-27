@@ -1,5 +1,5 @@
 <p align="center">
-  <img src=".github/logo.png" width="120" alt="ProxyRoute">
+  <img src=".github/logo.png" width="512" alt="ProxyRoute">
 </p>
 
 Android 10+ proxy client with a native VPN service, per-app firewall, traffic history and a local connection journal. No account, advertising or analytics.
