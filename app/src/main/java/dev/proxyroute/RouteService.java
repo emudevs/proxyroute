@@ -106,7 +106,8 @@ public final class RouteService extends VpnService {
         if (!wanted) return;
         try {
             Network network = Config.physicalNetwork(networks);
-            boolean fallback = config.enabled("wifiOnly", false) && network != null && !isWifi(network);
+            boolean fallback = config.enabled("wifiOnly", false) && network != null
+                    && !isWifi(network) && config.read().active() != null;
             boolean validationRestored = validated(network) && !tunnelValidated;
             boolean changed = !java.util.Objects.equals(network, tunnelNetwork);
             if (changed || validationRestored || wifiFallback != fallback || (engine == null && network != null)) {
@@ -220,6 +221,7 @@ public final class RouteService extends VpnService {
                 // Retain the capture routes while the old bound sockets are unavailable.
                 tunnelNetwork = null;
                 tunnelValidated = false;
+                wifiFallback = false;
                 setUnderlyingNetworks(new Network[0]);
                 update(new Status(true, false, "VPN · ожидание сети"));
                 return;
